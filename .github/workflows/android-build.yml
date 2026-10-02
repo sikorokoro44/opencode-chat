@@ -29,8 +29,10 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # The ubuntu-latest image already ships a working Android SDK; the
+      # setup-android action tries to install the long-removed "tools" package.
+      - name: Report Android SDK
+        run: echo "ANDROID_HOME=$ANDROID_HOME"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4

@@ -67,6 +67,7 @@ fun ChatsScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ChatRow(chat: ChatDto, onOpen: () -> Unit, onDelete: () -> Unit) {
     ListItem(
