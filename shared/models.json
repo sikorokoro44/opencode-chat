@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "primaryModelId": "big-pickle",
+  "maxFallbackDepth": 4,
+  "models": [
+    {
+      "id": "big-pickle",
+      "displayName": "Big Pickle",
+      "provider": "opencode-zen",
+      "endpoint": "/chat/completions",
+      "capabilities": ["text", "vision", "tools", "streaming"],
+      "contextWindow": 128000,
+      "maxOutputTokens": 8192,
+      "priority": 0,
+      "fallbackOnly": false
+    },
+    {
+      "id": "big-pickle-free",
+      "displayName": "Big Pickle (free tier)",
+      "provider": "opencode-zen",
+      "endpoint": "/chat/completions",
+      "capabilities": ["text", "tools", "streaming"],
+      "contextWindow": 128000,
+      "maxOutputTokens": 8192,
+      "priority": 1,
+      "fallbackOnly": false
+    },
+    {
+      "id": "gemini-2.5-flash-lite",
+      "displayName": "Gemini 2.5 Flash Lite",
+      "provider": "opencode-zen",
+      "endpoint": "/chat/completions",
+      "capabilities": ["text", "streaming"],
+      "contextWindow": 1000000,
+      "maxOutputTokens": 8192,
+      "priority": 2,
+      "fallbackOnly": true
+    },
+    {
+      "id": "llama-3.3-70b-free",
+      "displayName": "Llama 3.3 70B (free)",
+      "provider": "openrouter",
+      "endpoint": "/chat/completions",
+      "capabilities": ["text", "streaming"],
+      "contextWindow": 131072,
+      "maxOutputTokens": 4096,
+      "priority": 3,
+      "fallbackOnly": true
+    },
+    {
+      "id": "deepseek-chat-free",
+      "displayName": "DeepSeek Chat (free)",
+      "provider": "openrouter",
+      "endpoint": "/chat/completions",
+      "capabilities": ["text", "tools", "streaming"],
+      "contextWindow": 65536,
+      "maxOutputTokens": 4096,
+      "priority": 4,
+      "fallbackOnly": true
+    },
+    {
+      "id": "qwen-2.5-72b-instruct-free",
+      "displayName": "Qwen 2.5 72B Instruct (free)",
+      "provider": "openrouter",
+      "endpoint": "/chat/completions",
+      "capabilities": ["text", "streaming"],
+      "contextWindow": 32768,
+      "maxOutputTokens": 4096,
+      "priority": 5,
+      "fallbackOnly": true
+    }
+  ]
+}

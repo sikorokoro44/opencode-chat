@@ -1,1 +1,34 @@
-node_modules/\n.DS_Store\n*.log\n.env\n
+# OS / editor
+.DS_Store
+*.log
+.idea/
+.vscode/
+*.iml
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+dist/
+coverage/
+
+# Backend runtime data
+backend/data/
+backend/data-test/
+backend/*.corrupt
+
+# Android / Gradle
+.gradle/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.kotlin/
+captures/
+*.apk
+*.aab
+*.keystore
+!android/gradle/wrapper/gradle-wrapper.jar

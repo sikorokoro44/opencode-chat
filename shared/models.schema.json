@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opencode.chat/shared/models.json",
+  "title": "Free model registry shared by backend and Android client",
+  "description": "Single source of truth for the free models the product is allowed to serve. The backend enforces this allow-list; the Android client uses it to render pickers without contacting the network.",
+  "type": "object",
+  "required": ["version", "primaryModelId", "models"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "type": "integer", "minimum": 1 },
+    "primaryModelId": {
+      "type": "string",
+      "description": "Model used first for every request (Big Pickle).",
+      "const": "big-pickle"
+    },
+    "maxFallbackDepth": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8,
+      "description": "How many fallback models may be tried before a request fails."
+    },
+    "models": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "displayName",
+          "provider",
+          "endpoint",
+          "capabilities",
+          "contextWindow",
+          "maxOutputTokens",
+          "priority"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
+          "displayName": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "provider": { "type": "string", "enum": ["opencode-zen", "openrouter", "custom"] },
+          "endpoint": {
+            "type": "string",
+            "description": "OpenAI-compatible /chat/completions path appended to the configured base URL. Must be https in production."
+          },
+          "capabilities": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "enum": ["text", "vision", "tools", "streaming"] }
+          },
+          "contextWindow": { "type": "integer", "minimum": 1024 },
+          "maxOutputTokens": { "type": "integer", "minimum": 16 },
+          "priority": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Lower is tried first. The primary model must have the lowest priority."
+          },
+          "fallbackOnly": {
+            "type": "boolean",
+            "default": false,
+            "description": "When true the model is never selected directly by the user, only via fallback."
+          }
+        }
+      }
+    }
+  }
+}

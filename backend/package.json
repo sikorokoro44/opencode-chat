@@ -1,0 +1,23 @@
+{
+  "name": "opencode-chat-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Streaming chat + GitHub coding-agent backend for the opencode-chat Android app",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "start": "node --experimental-strip-types src/index.ts",
+    "dev": "node --watch --experimental-strip-types src/index.ts",
+    "test": "node --experimental-strip-types --test --test-reporter=spec \"test/**/*.test.ts\"",
+    "test:coverage": "node --experimental-strip-types --test --experimental-test-coverage --test-reporter=spec \"test/**/*.test.ts\"",
+    "lint": "node scripts/lint.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.10",
+    "typescript": "5.5.4"
+  }
+}
