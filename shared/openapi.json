@@ -408,6 +408,25 @@
         "responses": { "204": { "description": "Cancelled" } }
       }
     },
+    "/v1/chats/{chatId}/regenerate": {
+      "get": {
+        "summary": "Discard the previous assistant reply and stream a replacement",
+        "parameters": [
+          { "name": "chatId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "modelId", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream of SseEvent objects",
+            "content": { "text/event-stream": { "schema": { "$ref": "#/components/schemas/SseEvent" } } }
+          },
+          "400": {
+            "description": "No user turn to regenerate from",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      }
+    },
     "/v1/attachments": {
       "post": {
         "summary": "Upload an attachment (base64 payload)",
@@ -645,6 +664,19 @@
                     }
                   }
                 }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Record a chat session in GitHub-first memory",
+        "responses": {
+          "201": {
+            "description": "Stored",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "properties": { "stored": { "type": "boolean" } } }
               }
             }
           }

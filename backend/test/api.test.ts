@@ -286,12 +286,78 @@ test("streams meta/delta/done over SSE and persists the reply", async () => {
     const done = JSON.parse(events.find((event) => event.event === "done")?.data ?? "{}");
     assert.equal(done.model, "big-pickle");
 
+    const providerBody = fake.lastRequest("provider.test")?.body as
+      | { messages?: { role: string; content: unknown }[] }
+      | undefined;
+    assert.deepEqual(
+      (providerBody?.messages ?? []).map((message) => [message.role, message.content]),
+      [["user", "hello"]],
+    );
+
     const detail = await request<{ messages: { role: string; content: string }[] }>(
       app.baseUrl,
       `/v1/chats/${chat.body.id}?messageLimit=10`,
       { token: account.token },
     );
     assert.equal(detail.body.messages.at(-1)?.content, "streamed");
+  } finally {
+    await app.close();
+    await app.cleanup();
+  }
+});
+
+test("regenerate replaces the previous answer instead of stacking a second one", async () => {
+  const fake = new FakeFetch();
+  withCompletion(fake, ["first"]);
+  const app = await boot(fake);
+  try {
+    const account = await registerAccount(app.baseUrl, "judy");
+    const chat = await request<{ id: string }>(app.baseUrl, "/v1/chats", {
+      token: account.token,
+      body: { title: "Regen" },
+    });
+
+    const first = await fetch(`${app.baseUrl}/v1/chats/${chat.body.id}/stream?content=hi&modelId=big-pickle`, {
+      headers: { authorization: `Bearer ${account.token}` },
+    });
+    await readSse(first);
+
+    withCompletion(fake, ["second"]);
+    const regen = await fetch(`${app.baseUrl}/v1/chats/${chat.body.id}/regenerate?modelId=big-pickle`, {
+      headers: { authorization: `Bearer ${account.token}` },
+    });
+    assert.equal(regen.status, 200);
+    assert.match(regen.headers.get("content-type") ?? "", /text\/event-stream/);
+    const events = await readSse(regen);
+    const deltas = events.filter((event) => event.event === "delta").map((event) => JSON.parse(event.data).text);
+    assert.equal(deltas.join(""), "second");
+
+    const detail = await request<{ messages: { role: string; content: string }[] }>(
+      app.baseUrl,
+      `/v1/chats/${chat.body.id}?messageLimit=10`,
+      { token: account.token },
+    );
+    assert.deepEqual(
+      detail.body.messages.map((message) => message.content),
+      ["hi", "second"],
+    );
+  } finally {
+    await app.close();
+    await app.cleanup();
+  }
+});
+
+test("regenerate without a user turn is rejected", async () => {
+  const app = await boot(new FakeFetch());
+  try {
+    const account = await registerAccount(app.baseUrl, "karl");
+    const chat = await request<{ id: string }>(app.baseUrl, "/v1/chats", {
+      token: account.token,
+      body: { title: "Empty" },
+    });
+    const regen = await request(app.baseUrl, `/v1/chats/${chat.body.id}/regenerate`, { token: account.token });
+    assert.equal(regen.status, 400);
+    assert.equal(regen.body.error.code, "no_user_message");
   } finally {
     await app.close();
     await app.cleanup();
@@ -435,6 +501,46 @@ test("GitHub connect, status, repos and disconnect", async () => {
       token: account.token,
     });
     assert.equal(after.body.connected, false);
+  } finally {
+    await app.close();
+    await app.cleanup();
+  }
+});
+
+test("POST /v1/github/memory/sessions stores one session document", async () => {
+  const fake = new FakeFetch();
+  fake.on("github.test", (request) => {
+    if (request.url.includes("/contents/") && request.method === "GET") {
+      return { status: 404, body: '{"message":"nf"}' };
+    }
+    if (request.url.includes("/contents/")) return { body: JSON.stringify({ commit: { sha: "s1" } }) };
+    return { body: "{}" };
+  });
+  fake.on("github.test/user", () => ({ body: JSON.stringify({ login: "octocat" }) }));
+  const app = await boot(fake);
+  try {
+    const account = await registerAccount(app.baseUrl, "nina");
+    await request(app.baseUrl, "/v1/github/connect", {
+      token: account.token,
+      body: { token: "ghp_abcdefghijklmnopqrstuvwxyz012345" },
+    });
+
+    const stored = await request<{ stored: boolean }>(app.baseUrl, "/v1/github/memory/sessions", {
+      method: "POST",
+      token: account.token,
+      body: {
+        owner: "octocat",
+        repo: "hello-world",
+        branch: "main",
+        chatId: "chat1",
+        title: "Session",
+        summary: "what happened",
+      },
+    });
+    assert.equal(stored.status, 201);
+    assert.equal(stored.body.stored, true);
+    const put = fake.requests.find((entry) => entry.method === "PUT" && entry.url.includes("/contents/"));
+    assert.ok(put && put.url.includes("session-chat1.md"));
   } finally {
     await app.close();
     await app.cleanup();

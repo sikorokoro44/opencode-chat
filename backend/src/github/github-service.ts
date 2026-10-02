@@ -412,12 +412,20 @@ export class GitHubService {
   /** Records session memory into GitHub. Best-effort: never fails the chat. */
   async recordSessionMemory(
     user: UserRecord,
-    input: { owner: string; repo: string; branch: string; chatId: string; title: string; summary: string },
+    input: {
+      owner: string;
+      repo: string;
+      branch: string;
+      chatId: string;
+      title: string;
+      summary: string;
+      bootstrapToken?: string;
+    },
   ): Promise<void> {
     assertRepoName(input.owner, input.repo);
     const path = `sessions/session-${input.chatId}.md`;
     assertSafeRepoPath(path);
-    const credential = this.credentialFor(user);
+    const credential = this.credentialFor(user, input.bootstrapToken);
     const content = [
       `# ${input.title}`,
       "",

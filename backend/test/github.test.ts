@@ -371,6 +371,49 @@ test("listMemorySessions surfaces only session documents", async () => {
   );
 });
 
+test("recordSessionMemory commits one session document and is best-effort", async () => {
+  const fake = new FakeFetch();
+  let putBody: unknown;
+  fake.on(HOST, (request) => {
+    if (request.url.includes("/contents/") && request.method === "GET") {
+      return { status: 404, body: '{"message":"nf"}' };
+    }
+    if (request.url.includes("/contents/")) {
+      putBody = request.body;
+      return { body: JSON.stringify({ commit: { sha: "s1" } }) };
+    }
+    return { body: "{}" };
+  });
+  const svc = service(fake.fetch, { serviceToken: "t" });
+  const linked = user({ githubTokenCipher: new SecretStore(KEY).seal("ghp", "usr_1") });
+  await svc.recordSessionMemory(linked, {
+    owner: "o",
+    repo: "r",
+    branch: "main",
+    chatId: "abc",
+    title: "Session title",
+    summary: "what happened",
+  });
+  const written = JSON.stringify(putBody);
+  assert.match(written, /email|message/);
+  assert.match(written, /session abc/);
+
+  const failing = service(
+    new FakeFetch().on(HOST, { status: 500, body: '{"message":"boom"}' }).fetch,
+    { serviceToken: "t" },
+  );
+  await assert.doesNotReject(() =>
+    failing.recordSessionMemory(linked, {
+      owner: "o",
+      repo: "r",
+      branch: "main",
+      chatId: "abc",
+      title: "Session title",
+      summary: "what happened",
+    }),
+  );
+});
+
 test("timingSafeEqualString compares without short-circuiting on content", () => {
   assert.equal(timingSafeEqualString("abcdef", "abcdef"), true);
   assert.equal(timingSafeEqualString("abcdef", "abcdeg"), false);

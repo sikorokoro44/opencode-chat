@@ -291,16 +291,21 @@ export function registerRoutes(router: Router, deps: RouteDependencies): void {
     }
   });
 
-  router.get("/v1/chats/{chatId}/stream", async (ctx) => {
-    const userId = principalOf(ctx).userId;
-    const chatId = str(ctx.params, "chatId", { min: 1, max: 128 });
-    const chat = deps.chats.requireChat(userId, chatId);
-
-    const content = str(asObject(queryObject(ctx.query)), "content", { min: 1, max: 32_000 });
-    const requestedModel = ctx.query.get("modelId") ?? "";
-    const clientMessageId = ctx.query.get("messageId") ?? "";
-    const attachmentIds = ctx.query.getAll("attachmentIds").filter((id) => id !== "").slice(0, 8);
-
+  /**
+   * Streams one assistant completion into an already-open SSE response and
+   * persists the result. Shared by `/stream` (new turn) and `/regenerate`
+   * (replace the previous answer) so both behave identically.
+   */
+  const runAssistantStream = async (args: {
+    ctx: RequestContext;
+    userId: string;
+    chatId: string;
+    content: string;
+    attachmentIds: string[];
+    requestedModel: string;
+    appendUserMessage: boolean;
+  }): Promise<void> => {
+    const { ctx, userId, chatId } = args;
     const sse = new SseWriter({ res: ctx.res, heartbeatMs: deps.config.streamHeartbeatMs });
     const { key, controller } = streams.start(userId, chatId);
     const onClientGone = () => controller.abort();
@@ -313,12 +318,24 @@ export function registerRoutes(router: Router, deps: RouteDependencies): void {
     };
 
     try {
-      deps.chats.appendMessage(userId, chatId, { role: "user", content, attachmentIds });
-
-      const modelId = requestedModel !== "" ? requestedModel : chat.modelId;
+      const chat = deps.chats.requireChat(userId, chatId);
+      const modelId = args.requestedModel !== "" ? args.requestedModel : chat.modelId;
       const registryModel = deps.registry.require(modelId ?? deps.registry.primaryModelId);
-      const providerMessages = deps.chats.buildProviderMessages(chatId, { content, attachmentIds }, registryModel);
+      // Built before the assistant row so history is exactly the turns so far.
+      const providerMessages = deps.chats.buildProviderMessages(
+        chatId,
+        { content: args.content, attachmentIds: args.attachmentIds },
+        registryModel,
+      );
       const inlined = await deps.chats.inlineAttachments(providerMessages, userId);
+
+      if (args.appendUserMessage) {
+        deps.chats.appendMessage(userId, chatId, {
+          role: "user",
+          content: args.content,
+          attachmentIds: args.attachmentIds,
+        });
+      }
 
       // The assistant row is created up front so the client has a stable id and
       // can persist partial output if the connection drops.
@@ -327,7 +344,6 @@ export function registerRoutes(router: Router, deps: RouteDependencies): void {
         content: "",
         modelId: registryModel.id,
       });
-      if (clientMessageId !== "") void clientMessageId;
 
       let assistantText = "";
       let lastFlush = Date.now();
@@ -397,6 +413,46 @@ export function registerRoutes(router: Router, deps: RouteDependencies): void {
       ctx.req.removeListener("close", onClientGone);
       sse.close();
     }
+  };
+
+  router.get("/v1/chats/{chatId}/stream", async (ctx) => {
+    const userId = principalOf(ctx).userId;
+    const chatId = str(ctx.params, "chatId", { min: 1, max: 128 });
+    deps.chats.requireChat(userId, chatId);
+
+    const content = str(asObject(queryObject(ctx.query)), "content", { min: 1, max: 32_000 });
+    const requestedModel = ctx.query.get("modelId") ?? "";
+    const attachmentIds = ctx.query.getAll("attachmentIds").filter((id) => id !== "").slice(0, 8);
+
+    await runAssistantStream({
+      ctx,
+      userId,
+      chatId,
+      content,
+      attachmentIds,
+      requestedModel,
+      appendUserMessage: true,
+    });
+    return undefined;
+  });
+
+  router.get("/v1/chats/{chatId}/regenerate", async (ctx) => {
+    const userId = principalOf(ctx).userId;
+    const chatId = str(ctx.params, "chatId", { min: 1, max: 128 });
+    // Removes the previous answer (and any tool turns) before streaming a new one.
+    const lastUser = deps.chats.resetToLastUserTurn(userId, chatId);
+    if (!lastUser) throw badRequest("no_user_message", "there is no user message to regenerate from");
+
+    const requestedModel = ctx.query.get("modelId") ?? "";
+    await runAssistantStream({
+      ctx,
+      userId,
+      chatId,
+      content: lastUser.content,
+      attachmentIds: lastUser.attachmentIds,
+      requestedModel,
+      appendUserMessage: false,
+    });
     return undefined;
   });
 
@@ -646,6 +702,23 @@ export function registerRoutes(router: Router, deps: RouteDependencies): void {
     const token = agentToken(ctx);
     const resolvedRef = ref === "" ? await deps.github.defaultBranch(user, owner, repo, token) : ref;
     return { sessions: await deps.github.listMemorySessions(user, owner, repo, resolvedRef, token) };
+  });
+
+  router.post("/v1/github/memory/sessions", async (ctx) => {
+    const user = userOf(ctx);
+    const body = asObject(await ctx.json());
+    const token = agentToken(ctx);
+    await deps.github.recordSessionMemory(user, {
+      owner: str(body, "owner", { min: 1, max: 100 }),
+      repo: str(body, "repo", { min: 1, max: 100 }),
+      branch: str(body, "branch", { min: 1, max: 200 }),
+      chatId: str(body, "chatId", { min: 1, max: 128 }),
+      title: str(body, "title", { min: 1, max: 200 }),
+      summary: str(body, "summary", { min: 1, max: 16_000, trim: false }),
+      ...(token === undefined ? {} : { bootstrapToken: token }),
+    });
+    writeJson(ctx.res, 201, { stored: true });
+    return undefined;
   });
 }
 

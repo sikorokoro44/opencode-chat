@@ -184,6 +184,43 @@ export class ChatService {
     return record;
   }
 
+  /** Keeps the newest messages that fit the history token budget. */
+  private selectHistory(history: MessageRecord[]): MessageRecord[] {
+    const budgetChars = HISTORY_BUDGET_TOKENS * this.charsPerToken;
+    const selected: MessageRecord[] = [];
+    let used = 0;
+    for (let index = history.length - 1; index >= 0; index -= 1) {
+      const message = history[index] as MessageRecord;
+      const cost = message.content.length;
+      if (selected.length > 0 && used + cost > budgetChars) break;
+      used += cost;
+      selected.unshift(message);
+    }
+    return selected;
+  }
+
+  /**
+   * Drops assistant/tool messages that follow the last user turn and returns that
+   * user message, so a regenerate streams a replacement answer rather than
+   * stacking a second reply.
+   */
+  resetToLastUserTurn(userId: string, chatId: string): MessageRecord | null {
+    this.requireChat(userId, chatId);
+    const messages = this.messagesOf(chatId);
+    let lastUserIndex = -1;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if ((messages[index] as MessageRecord).role === "user") {
+        lastUserIndex = index;
+        break;
+      }
+    }
+    if (lastUserIndex === -1) return null;
+    for (let index = messages.length - 1; index > lastUserIndex; index -= 1) {
+      this.database.messages.delete((messages[index] as MessageRecord).id);
+    }
+    return messages[lastUserIndex] as MessageRecord;
+  }
+
   messagesOf(chatId: string): MessageRecord[] {
     const messages = this.database.messages.filter((message) => message.chatId === chatId);
     // `Array.prototype.sort` is stable, so equal timestamps keep insertion order
@@ -211,20 +248,15 @@ export class ChatService {
     pendingUserMessage: { content: string; attachmentIds: string[] },
     model: RegistryModel,
   ): ProviderMessage[] {
-    const supportsVision = model.capabilities.includes(VISION_CAPABLE);
-    const budgetChars = HISTORY_BUDGET_TOKENS * this.charsPerToken;
-    const history = this.messagesOf(chatId);
-
-    const selected: MessageRecord[] = [];
-    let used = 0;
-    for (let index = history.length - 1; index >= 0; index -= 1) {
-      const message = history[index] as MessageRecord;
-      const cost = message.content.length;
-      if (selected.length > 0 && used + cost > budgetChars) break;
-      used += cost;
-      selected.unshift(message);
+    const selected = this.selectHistory(this.messagesOf(chatId));
+    // Callers may persist the user turn before building history; drop a trailing
+    // duplicate so the model never receives the same question twice.
+    const trailing = selected[selected.length - 1];
+    if (trailing && trailing.role === "user" && trailing.content === pendingUserMessage.content) {
+      selected.pop();
     }
 
+    const supportsVision = model.capabilities.includes(VISION_CAPABLE);
     const messages: ProviderMessage[] = [];
     for (const message of selected) {
       messages.push({

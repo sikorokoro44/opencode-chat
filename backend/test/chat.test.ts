@@ -322,3 +322,38 @@ test("message records are returned in chronological order", () => {
   const contents = chats.listMessages("u1", chat.id).map((message) => message.content);
   assert.deepEqual(contents, ["0", "1", "2", "3", "4"]);
 });
+
+test("a user turn that is already persisted is not sent to the provider twice", () => {
+  const chats = service();
+  const chat = chats.createChat("u1");
+  const model = registry.require("big-pickle");
+  chats.appendMessage("u1", chat.id, { role: "user", content: "only once" });
+
+  const messages = chats.buildProviderMessages(chat.id, { content: "only once", attachmentIds: [] }, model);
+  const userTurns = messages.filter((message) => message.role === "user" && message.content === "only once");
+  assert.equal(userTurns.length, 1);
+  assert.equal(messages.at(-1)?.role, "user");
+  assert.equal(messages.at(-1)?.content, "only once");
+});
+
+test("resetToLastUserTurn drops the previous answer and keeps the question", () => {
+  const chats = service();
+  const chat = chats.createChat("u1");
+  chats.appendMessage("u1", chat.id, { role: "user", content: "question" });
+  chats.appendMessage("u1", chat.id, { role: "assistant", content: "first answer" });
+  chats.appendMessage("u1", chat.id, { role: "tool", content: "tool output" });
+
+  const lastUser = chats.resetToLastUserTurn("u1", chat.id);
+  assert.equal(lastUser?.content, "question");
+  assert.deepEqual(
+    chats.listMessages("u1", chat.id).map((message) => message.content),
+    ["question"],
+  );
+});
+
+test("resetToLastUserTurn returns null when there is no user turn", () => {
+  const chats = service();
+  const chat = chats.createChat("u1");
+  chats.appendMessage("u1", chat.id, { role: "assistant", content: "unsolicited" });
+  assert.equal(chats.resetToLastUserTurn("u1", chat.id), null);
+});
