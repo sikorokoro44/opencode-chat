@@ -51,9 +51,13 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch { container.settingsStore.setBaseUrl(value) }
     }
 
-    fun login(username: String, password: String) = authenticate { auth.login(username, password) }
+    fun login(username: String, password: String) {
+        viewModelScope.launch { authenticate { auth.login(username, password) } }
+    }
 
-    fun register(username: String, password: String) = authenticate { auth.register(username, password) }
+    fun register(username: String, password: String) {
+        viewModelScope.launch { authenticate { auth.register(username, password) } }
+    }
 
     fun logout() {
         viewModelScope.launch {
