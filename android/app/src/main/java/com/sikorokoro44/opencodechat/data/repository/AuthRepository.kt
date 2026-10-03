@@ -15,6 +15,11 @@ class AuthRepository(
     private val settingsStore: SettingsStore,
     private val deviceName: String,
 ) {
+    companion object {
+        /** No server has been configured yet, so there is nothing to talk to. */
+        const val MISSING_SERVER_URL = "missing_server_url"
+    }
+
     suspend fun register(username: String, password: String): ApiResult<AuthTokens> {
         val baseUrl = settingsStore.baseUrl()
         insecureTransport(baseUrl)?.let { return it }
@@ -50,9 +55,15 @@ class AuthRepository(
     /**
      * Failure describing why [baseUrl] may not carry credentials, or null when
      * it may. Every path that puts a password, access token or refresh token on
-     * the wire checks this first.
+     * the wire checks this first, and an unconfigured URL is refused here so no
+     * request is ever attempted.
      */
     suspend fun insecureTransport(baseUrl: String): ApiResult.Failure? {
+        // Nothing configured yet (or only the retired placeholder): report what
+        // is missing instead of letting DNS fail with "Unable to resolve host".
+        if (BackendUrlPolicy.configured(baseUrl).isEmpty()) {
+            return ApiResult.Failure(code = MISSING_SERVER_URL, message = BackendUrlPolicy.MISSING_URL_MESSAGE)
+        }
         val allowed = settingsStore.allowInsecureHttp()
         if (BackendUrlPolicy.permitsCredentials(baseUrl, allowed)) return null
         return ApiResult.Failure(

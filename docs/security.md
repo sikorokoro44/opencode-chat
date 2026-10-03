@@ -53,9 +53,19 @@ refuses to put a credential on an unencrypted socket:
   `10.0.2.2`, the emulator's alias for the host machine.
 - `BackendUrlPolicy` is the application-layer guard that runs first. A URL typed
   without a scheme becomes `https://`.
+- There is no default server. A fresh install ships with an empty URL, and the
+  example in the field is placeholder text that is never stored or dialled, so
+  the app cannot send the user to a host that does not exist. `v1.0.1`
+  pre-filled `https://opencode-chat.example.com`; that reserved documentation
+  domain is now treated as "not configured" wherever it was persisted.
 - Every path that carries a password, access token or refresh token checks the
   policy before building a request and fails closed with `insecure_transport` if
-  the transport is not allowed.
+  the transport is not allowed. With no server configured it fails closed with
+  `missing_server_url` and the message "Enter your server URL…", so the app asks
+  for the URL instead of surfacing a resolver error.
+- Nothing reaches the network until a URL is configured, including startup:
+  without one, the client skips its initial refresh even if a previous session
+  left tokens on the device.
 - Plain HTTP to a remote host is possible only after the user ticks "Allow
   unencrypted HTTP" for that server. The consent is not inferred from the URL,
   defaults to off, and is retracted automatically when the URL returns to HTTPS or

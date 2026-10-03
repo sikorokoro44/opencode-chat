@@ -16,6 +16,7 @@ import com.sikorokoro44.opencodechat.data.model.ModelInfoDto
 import com.sikorokoro44.opencodechat.data.model.RepoDto
 import com.sikorokoro44.opencodechat.data.model.UpdateChatRequest
 import com.sikorokoro44.opencodechat.data.remote.ApiResult
+import com.sikorokoro44.opencodechat.data.remote.BackendUrlPolicy
 import com.sikorokoro44.opencodechat.di.AppContainer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -97,7 +98,9 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
                     allowInsecureHttp = auth.allowInsecureHttp(),
                 )
             }
-            if (tokens != null) refreshOverview()
+            // First run has no server configured. Stay off the network until the
+            // user has entered one, even if a previous session left tokens behind.
+            if (tokens != null && BackendUrlPolicy.configured(baseUrl).isNotEmpty()) refreshOverview()
         }
     }
 

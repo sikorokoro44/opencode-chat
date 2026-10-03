@@ -35,15 +35,51 @@ enum class TransportVerdict(val permitsCredentials: Boolean) {
  * `network_security_config.xml` refuses cleartext for every host except
  * loopback. This policy is the application-layer guard that runs first and
  * explains the refusal to the user.
+ *
+ * There is no default server: [configured] returns "" until the user supplies
+ * one, and [SERVER_URL_EXAMPLE] exists purely as hint text. Nothing here
+ * resolves a host, so an unconfigured app fails closed with a message instead
+ * of attempting DNS for a host that does not exist.
  */
 object BackendUrlPolicy {
     private val SCHEME = Regex("^[A-Za-z][A-Za-z0-9+.\\-]*://")
+
+    /**
+     * Shape of the URL to suggest, shown only as placeholder text in the
+     * Server URL field. It is never stored, never defaulted to and never
+     * dialled: a fabricated host must not become something the app talks to.
+     * It is `https://` so the suggestion keeps the secure transport.
+     */
+    const val SERVER_URL_EXAMPLE = "https://chat.example.com"
+
+    /** Told to the user instead of a DNS error when no server is configured yet. */
+    const val MISSING_URL_MESSAGE = "Enter your server URL, for example $SERVER_URL_EXAMPLE"
+
+    /**
+     * The placeholder that shipped as the v1.0.1 default. It is under a
+     * reserved documentation domain and never resolved, so wherever it was
+     * persisted it counts as "no server configured" rather than as a host to
+     * dial on upgrade.
+     */
+    const val RETIRED_PLACEHOLDER_URL = "https://opencode-chat.example.com"
 
     /** Trims, drops trailing slashes and defaults a missing scheme to https. */
     fun normalize(raw: String): String {
         val trimmed = raw.trim().trimEnd('/')
         if (trimmed.isEmpty()) return ""
         return if (SCHEME.containsMatchIn(trimmed)) trimmed else "https://$trimmed"
+    }
+
+    /**
+     * The URL to actually use, or "" when nothing usable was configured.
+     *
+     * First run therefore has no server at all: callers see an empty string and
+     * ask the user for one instead of resolving a host that does not exist.
+     */
+    fun configured(raw: String?): String {
+        val normalized = normalize(raw.orEmpty())
+        val retired = normalized.equals(RETIRED_PLACEHOLDER_URL, ignoreCase = true)
+        return if (normalized.isEmpty() || retired) "" else normalized
     }
 
     fun verdict(raw: String, allowInsecureHttp: Boolean): TransportVerdict {
@@ -92,8 +128,12 @@ object BackendUrlPolicy {
             "This server uses unencrypted HTTP. Your password and tokens are being sent in the clear on this network."
 
         TransportVerdict.INSECURE_BLOCKED -> when {
+            // Nothing has been entered yet, so say what is missing instead of
+            // letting the request fail later with a DNS error.
+            configured(raw).isEmpty() -> MISSING_URL_MESSAGE
+
             parse(raw) == null ->
-                "Enter a valid server URL, for example https://chat.example.com"
+                "Enter a valid server URL, for example $SERVER_URL_EXAMPLE"
 
             else ->
                 "Refusing to send credentials over unencrypted HTTP. Use an https:// server URL, " +

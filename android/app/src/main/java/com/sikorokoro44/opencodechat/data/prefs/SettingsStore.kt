@@ -28,7 +28,15 @@ interface SettingsStore {
     suspend fun setAllowInsecureHttp(value: Boolean)
 
     companion object {
-        const val DEFAULT_BASE_URL = "https://opencode-chat.example.com"
+        /**
+         * A fresh install has no server configured.
+         *
+         * There is deliberately no fabricated default here: pre-filling a
+         * placeholder host sent the user to a domain that cannot resolve
+         * ("Unable to resolve host"). The field starts empty and the app asks
+         * for a URL before it touches the network.
+         */
+        const val DEFAULT_BASE_URL = ""
     }
 }
 
@@ -40,10 +48,9 @@ class DataStoreSettingsStore(private val context: Context) : SettingsStore {
     private val allowInsecureHttpKey = booleanPreferencesKey("allow_insecure_http")
 
     override val baseUrlFlow: Flow<String> = context.settingsDataStore.data.map { preferences ->
-        preferences[baseUrlKey]
-            ?.takeIf { it.isNotBlank() }
-            ?.let { normalize(it) }
-            ?: SettingsStore.DEFAULT_BASE_URL
+        // configured() maps an absent, blank or retired-placeholder value to "",
+        // so upgrading from v1.0.1 cannot resurrect its unresolvable default.
+        BackendUrlPolicy.configured(preferences[baseUrlKey])
     }
 
     override val allowInsecureHttpFlow: Flow<Boolean> = context.settingsDataStore.data.map { preferences ->
@@ -78,7 +85,7 @@ class DataStoreSettingsStore(private val context: Context) : SettingsStore {
 
 /** In-memory implementation so ViewModels and repositories can be tested on the JVM. */
 class InMemorySettingsStore(initial: String = SettingsStore.DEFAULT_BASE_URL) : SettingsStore {
-    private val state = MutableStateFlow(normalize(initial))
+    private val state = MutableStateFlow(BackendUrlPolicy.configured(initial))
     private val allowInsecure = MutableStateFlow(false)
 
     override val baseUrlFlow: Flow<String> = state
@@ -88,7 +95,9 @@ class InMemorySettingsStore(initial: String = SettingsStore.DEFAULT_BASE_URL) : 
     override suspend fun baseUrl(): String = state.value
 
     override suspend fun setBaseUrl(value: String) {
-        val normalized = normalize(value)
+        // configured() mirrors the DataStore read path, so this store reports ""
+        // for an empty field and for the retired v1.0.1 placeholder alike.
+        val normalized = BackendUrlPolicy.configured(value)
         state.value = normalized
         if (!BackendUrlPolicy.isCleartextRemote(normalized)) allowInsecure.value = false
     }
@@ -100,8 +109,8 @@ class InMemorySettingsStore(initial: String = SettingsStore.DEFAULT_BASE_URL) : 
     }
 }
 
-/** A missing scheme becomes https:// so the secure default is always explicit. */
-private fun normalize(value: String): String {
-    val normalized = BackendUrlPolicy.normalize(value)
-    return normalized.ifEmpty { SettingsStore.DEFAULT_BASE_URL }
-}
+/**
+ * Stores what the user configured and nothing else: a missing scheme becomes
+ * https://, and an empty field stays empty instead of reverting to a default.
+ */
+private fun normalize(value: String): String = BackendUrlPolicy.normalize(value)

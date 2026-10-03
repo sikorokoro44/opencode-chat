@@ -50,6 +50,10 @@ fun LoginScreen(
     val cleartextRemote = remember(state.baseUrl) {
         BackendUrlPolicy.isCleartextRemote(state.baseUrl)
     }
+    // False until the user names a real server; the field ships empty.
+    val configured = remember(state.baseUrl) {
+        BackendUrlPolicy.configured(state.baseUrl).isNotEmpty()
+    }
     val transportWarning = BackendUrlPolicy.explain(state.baseUrl, state.allowInsecureHttp)
 
     Column(
@@ -76,19 +80,23 @@ fun LoginScreen(
             value = state.baseUrl,
             onValueChange = onBaseUrlChange,
             label = { Text("Server URL") },
+            // Hint text only: the app never stores or dials this example.
+            placeholder = { Text(BackendUrlPolicy.SERVER_URL_EXAMPLE) },
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
             supportingText = {
                 Text(
-                    when (verdict) {
-                        TransportVerdict.SECURE -> "Secured with https://"
-                        TransportVerdict.LOOPBACK -> "http:// on this device only"
-                        TransportVerdict.INSECURE_ALLOWED, TransportVerdict.INSECURE_BLOCKED ->
-                            "Unencrypted http:// — not safe for real credentials"
+                    when {
+                        // Ask for the URL up front rather than letting a request
+                        // fail with an unresolvable-host error.
+                        !configured -> BackendUrlPolicy.MISSING_URL_MESSAGE
+                        verdict == TransportVerdict.SECURE -> "Secured with https://"
+                        verdict == TransportVerdict.LOOPBACK -> "http:// on this device only"
+                        else -> "Unencrypted http:// — not safe for real credentials"
                     },
                 )
             },
-            isError = verdict == TransportVerdict.INSECURE_BLOCKED,
+            isError = !configured || verdict == TransportVerdict.INSECURE_BLOCKED,
             modifier = Modifier.fillMaxWidth(),
         )
 
@@ -138,7 +146,7 @@ fun LoginScreen(
 
         Button(
             onClick = { if (registering) onRegister(username, password) else onLogin(username, password) },
-            enabled = !state.busy && username.isNotBlank() && password.isNotEmpty() && state.baseUrl.isNotBlank(),
+            enabled = !state.busy && username.isNotBlank() && password.isNotEmpty() && configured,
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text(if (registering) "Create account" else "Sign in")
