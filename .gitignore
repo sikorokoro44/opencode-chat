@@ -31,4 +31,8 @@ captures/
 *.apk
 *.aab
 *.keystore
+*.jks
+*.p12
+*.pem
+*.key
 !android/gradle/wrapper/gradle-wrapper.jar

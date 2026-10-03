@@ -4,6 +4,20 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+// Release signing material is injected by CI from GitHub Secrets. It is read
+// from the environment only: `-P` properties would be printed in the build log.
+// When the variables are absent (fork pull requests, local builds) the release
+// variant simply stays unsigned so the build still succeeds.
+val keystorePath = providers.environmentVariable("ANDROID_KEYSTORE_PATH").orNull
+val keystorePassword = providers.environmentVariable("ANDROID_KEYSTORE_PASSWORD").orNull
+val keyAlias = providers.environmentVariable("ANDROID_KEY_ALIAS").orNull
+val keyPassword = providers.environmentVariable("ANDROID_KEY_PASSWORD").orNull
+val hasReleaseSigning =
+    listOf(keystorePath, keystorePassword, keyAlias, keyPassword).all { !it.isNullOrBlank() }
+
+val versionNameOverride = providers.environmentVariable("ANDROID_VERSION_NAME").orNull
+val versionCodeOverride = providers.environmentVariable("ANDROID_VERSION_CODE").orNull?.toIntOrNull()
+
 android {
     namespace = "com.sikorokoro44.opencodechat"
     compileSdk = 34
@@ -12,14 +26,34 @@ android {
         applicationId = "com.sikorokoro44.opencodechat"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = versionCodeOverride ?: 1
+        versionName = versionNameOverride ?: "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = project.file(keystorePath!!)
+                storePassword = keystorePassword
+                keyAlias = keyAlias
+                keyPassword = keyPassword
+                // All three schemes are produced so the APK installs on
+                // API 24+ (v2/v3) and stays verifiable by tooling that
+                // checks legacy JAR signing (v1).
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
