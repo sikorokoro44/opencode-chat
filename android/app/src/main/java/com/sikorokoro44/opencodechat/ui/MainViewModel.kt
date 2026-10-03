@@ -58,6 +58,21 @@ data class UiState(
     val projectPath: String? = null,
 )
 
+/**
+ * Swaps an optimistic local id for the server-assigned one so a later reload
+ * reconciles with the same bubble. Blank, identical or already-present ids
+ * leave the list untouched.
+ */
+fun adoptServerMessageId(
+    messages: List<MessageDto>,
+    localId: String,
+    serverId: String?,
+): List<MessageDto> {
+    if (serverId.isNullOrBlank() || serverId == localId) return messages
+    if (messages.any { it.id == serverId }) return messages
+    return messages.map { message -> if (message.id == localId) message.copy(id = serverId) else message }
+}
+
 class MainViewModel(private val container: AppContainer) : ViewModel() {
     private val auth = container.authRepository
     private val chats = container.chatRepository
@@ -325,19 +340,8 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             }
 
             // Adopt the server-assigned id so a reload reconciles with this bubble.
-            "meta", "done" -> {
-                val serverId = event.messageId
-                if (!serverId.isNullOrBlank() && serverId != assistantId) {
-                    _state.update { current ->
-                        if (current.messages.any { it.id == serverId }) {
-                            current
-                        } else {
-                            current.copy(messages = current.messages.map { message ->
-                                if (message.id == assistantId) message.copy(id = serverId) else message
-                            })
-                        }
-                    }
-                }
+            "meta", "done" -> _state.update { current ->
+                current.copy(messages = adoptServerMessageId(current.messages, assistantId, event.messageId))
             }
 
             "error" -> setError(event.message ?: event.code ?: "stream failed")
