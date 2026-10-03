@@ -16,6 +16,7 @@ import io.ktor.http.isSuccess
 import io.ktor.utils.io.readUTF8Line
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.serialization.json.Json
@@ -38,6 +39,7 @@ class ChatStreamClient(
         chatId: String,
         content: String,
         modelId: String?,
+        attachmentIds: List<String> = emptyList(),
     ): Flow<ChatStreamEvent> = flow {
         val url = buildString {
             append(baseUrl)
@@ -49,7 +51,38 @@ class ChatStreamClient(
                 append("&modelId=")
                 append(modelId.encodeURLParameter())
             }
+            for (attachmentId in attachmentIds) {
+                append("&attachmentIds=")
+                append(attachmentId.encodeURLParameter())
+            }
         }
+        collectStream(url, token)
+    }.flowOn(Dispatchers.IO)
+
+    /** Replaces the previous answer for a chat by re-running the last user turn. */
+    fun regenerate(
+        baseUrl: String,
+        token: String,
+        chatId: String,
+        modelId: String?,
+    ): Flow<ChatStreamEvent> = flow {
+        val url = buildString {
+            append(baseUrl)
+            append("/v1/chats/")
+            append(chatId)
+            append("/regenerate")
+            if (!modelId.isNullOrBlank()) {
+                append("?modelId=")
+                append(modelId.encodeURLParameter())
+            }
+        }
+        collectStream(url, token)
+    }.flowOn(Dispatchers.IO)
+
+    private suspend fun FlowCollector<ChatStreamEvent>.collectStream(
+        url: String,
+        token: String,
+    ) {
         client.prepareGet(url) {
             header(HttpHeaders.Authorization, "Bearer $token")
             header(HttpHeaders.Accept, "text/event-stream")
@@ -65,7 +98,7 @@ class ChatStreamClient(
             }
             parser.flush()?.let { emit(it.toEvent()) }
         }
-    }.flowOn(Dispatchers.IO)
+    }
 
     private fun SseFrame.toEvent(): ChatStreamEvent = when (event) {
         "meta" -> json.decodeFromString(StreamMetaDto.serializer(), data).let {

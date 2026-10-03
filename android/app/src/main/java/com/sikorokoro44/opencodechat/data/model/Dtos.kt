@@ -132,6 +132,195 @@ data class SendMessageResponse(
 )
 
 @Serializable
+data class UpdateChatRequest(
+    val title: String? = null,
+    val pinned: Boolean? = null,
+    val repository: String? = null,
+    val branch: String? = null,
+    val projectPath: String? = null,
+    val modelId: String? = null,
+)
+
+@Serializable
+data class UploadAttachmentRequest(
+    val data: String,
+    val mimeType: String,
+    val fileName: String? = null,
+    val chatId: String? = null,
+)
+
+@Serializable
+data class RepoDto(
+    val fullName: String = "",
+    val name: String = "",
+    val owner: String = "",
+    val private: Boolean = false,
+    val defaultBranch: String? = null,
+    val description: String? = null,
+    val updatedAt: String? = null,
+    val language: String? = null,
+)
+
+@Serializable
+data class RepoListResponse(
+    val repos: List<RepoDto> = emptyList(),
+)
+
+@Serializable
+data class BranchDto(
+    val name: String = "",
+    val sha: String? = null,
+)
+
+@Serializable
+data class BranchListResponse(
+    val branches: List<BranchDto> = emptyList(),
+)
+
+@Serializable
+data class ContentEntryDto(
+    val path: String = "",
+    val name: String = "",
+    val type: String = "file",
+    val size: Long = 0,
+    val sha: String? = null,
+)
+
+@Serializable
+data class ContentsResponse(
+    val path: String = "",
+    val ref: String = "",
+    val entries: List<ContentEntryDto> = emptyList(),
+)
+
+@Serializable
+data class FileResponse(
+    val path: String = "",
+    val ref: String = "",
+    val sha: String? = null,
+    val size: Long = 0,
+    val truncated: Boolean = false,
+    val content: String = "",
+    val encoding: String? = null,
+)
+
+@Serializable
+data class MemoryResponse(
+    val exists: Boolean = false,
+    val path: String = "",
+    val content: String = "",
+    val updatedAt: String? = null,
+)
+
+@Serializable
+data class WriteMemoryRequest(
+    val owner: String,
+    val repo: String,
+    val branch: String,
+    val content: String,
+    val commitMessage: String? = null,
+)
+
+@Serializable
+data class WriteMemoryResponse(
+    val path: String = "",
+    val sha: String? = null,
+    val branch: String = "",
+)
+
+@Serializable
+data class MemorySessionDto(
+    val chatId: String = "",
+    val title: String = "",
+    val updatedAt: String = "",
+    val messageCount: Int = 0,
+)
+
+@Serializable
+data class MemorySessionsResponse(
+    val sessions: List<MemorySessionDto> = emptyList(),
+)
+
+@Serializable
+data class RecordSessionRequest(
+    val owner: String,
+    val repo: String,
+    val branch: String,
+    val chatId: String,
+    val title: String,
+    val summary: String,
+    val messageCount: Int? = null,
+)
+
+@Serializable
+data class RecordSessionResponse(
+    val stored: Boolean = false,
+    val path: String = "",
+    val branch: String = "",
+)
+
+@Serializable
+data class AgentActionDto(
+    val type: String = "",
+    val summary: String? = null,
+    val path: String? = null,
+    val repository: String? = null,
+    val branch: String? = null,
+    val url: String? = null,
+    val status: String? = null,
+)
+
+@Serializable
+data class AgentFileRequest(
+    val path: String,
+    val content: String,
+    val message: String? = null,
+)
+
+@Serializable
+data class AgentCommitRequest(
+    val owner: String,
+    val repo: String,
+    val baseBranch: String,
+    val branch: String? = null,
+    val commitMessage: String,
+    val createPullRequest: Boolean = false,
+    val pullRequestTitle: String? = null,
+    val pullRequestBody: String? = null,
+    val files: List<AgentFileRequest> = emptyList(),
+)
+
+@Serializable
+data class AgentCommitResponse(
+    val branch: String = "",
+    val baseBranch: String = "",
+    val commitSha: String? = null,
+    val prUrl: String? = null,
+    val files: List<String> = emptyList(),
+    val actions: List<AgentActionDto> = emptyList(),
+)
+
+@Serializable
+data class AgentRunRequest(
+    val repository: String,
+    val prompt: String,
+    val branch: String? = null,
+    val modelId: String? = null,
+    val chatId: String? = null,
+    val allowWrites: Boolean = false,
+)
+
+@Serializable
+data class AgentRunResponse(
+    val modelId: String? = null,
+    val text: String = "",
+    val steps: Int = 0,
+    val agentActions: List<AgentActionDto> = emptyList(),
+    val usage: UsageDto? = null,
+    val charactersStreamed: Int = 0,
+)
+
+@Serializable
 data class ErrorEnvelope(
     val error: ErrorBody? = null,
 )

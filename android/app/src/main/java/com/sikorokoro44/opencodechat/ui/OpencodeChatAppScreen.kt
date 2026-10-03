@@ -22,6 +22,7 @@ import com.sikorokoro44.opencodechat.OpencodeChatApp
 import com.sikorokoro44.opencodechat.ui.auth.LoginScreen
 import com.sikorokoro44.opencodechat.ui.chat.ChatScreen
 import com.sikorokoro44.opencodechat.ui.chat.ChatsScreen
+import com.sikorokoro44.opencodechat.ui.github.GithubScreen
 
 @Composable
 fun OpencodeChatAppScreen() {
@@ -43,11 +44,29 @@ fun OpencodeChatAppScreen() {
                 onRegister = viewModel::register,
             )
 
+            state.githubOpen -> {
+                BackHandler { viewModel.closeGithub() }
+                GithubScreen(
+                    state = state,
+                    onBack = viewModel::closeGithub,
+                    onConnect = viewModel::connectGithub,
+                    onDisconnect = viewModel::disconnectGithub,
+                    onSelectRepository = viewModel::selectRepository,
+                    onProjectBranch = viewModel::setProjectBranch,
+                    onProjectPath = viewModel::setProjectPath,
+                    onApplyProject = viewModel::applyProjectState,
+                    onRecordSession = viewModel::recordSession,
+                    onRunAgent = viewModel::runAgent,
+                )
+            }
+
             state.activeChatId == null -> ChatsScreen(
                 state = state,
-                onNewChat = viewModel::newChat,
+                onNewChat = { viewModel.newChat() },
+                onNewChatWithProject = viewModel::newChatWithProject,
                 onOpenChat = viewModel::openChat,
                 onDeleteChat = viewModel::deleteChat,
+                onOpenGithub = viewModel::openGithub,
                 onLogout = viewModel::logout,
             )
 
@@ -58,6 +77,10 @@ fun OpencodeChatAppScreen() {
                     onBack = viewModel::closeChat,
                     onSend = viewModel::send,
                     onSelectModel = viewModel::selectModel,
+                    onStop = viewModel::stop,
+                    onRegenerate = viewModel::regenerate,
+                    onAttach = viewModel::attach,
+                    onRemoveAttachment = viewModel::removeAttachment,
                 )
             }
         }

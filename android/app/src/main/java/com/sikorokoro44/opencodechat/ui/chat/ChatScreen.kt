@@ -1,5 +1,7 @@
 package com.sikorokoro44.opencodechat.ui.chat
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -10,9 +12,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
@@ -33,10 +39,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.sikorokoro44.opencodechat.data.model.MessageDto
 import com.sikorokoro44.opencodechat.ui.UiState
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -45,9 +54,29 @@ fun ChatScreen(
     onBack: () -> Unit,
     onSend: (String) -> Unit,
     onSelectModel: (String) -> Unit,
+    onStop: () -> Unit,
+    onRegenerate: () -> Unit,
+    onAttach: (ByteArray, String, String?) -> Unit,
+    onRemoveAttachment: (String) -> Unit,
 ) {
     var input by remember { mutableStateOf("") }
+    var attachError by remember { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
+    val context = LocalContext.current
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            val resolver = context.contentResolver
+            val mimeType = resolver.getType(uri) ?: "application/octet-stream"
+            // The server rejects anything larger, so never buffer more than its ceiling.
+            val bytes = runCatching { readBounded(resolver.openInputStream(uri), MAX_ATTACHMENT_BYTES) }.getOrNull()
+            if (bytes == null) {
+                attachError = "Attachment is too large or unreadable"
+            } else {
+                attachError = null
+                onAttach(bytes, mimeType, uri.lastPathSegment)
+            }
+        }
+    }
 
     LaunchedEffect(state.messages.size) {
         if (state.messages.isNotEmpty()) listState.animateScrollToItem(state.messages.lastIndex)
@@ -62,7 +91,14 @@ fun ChatScreen(
                         Icon(Icons.Default.ArrowBack, contentDescription = "Back")
                     }
                 },
-                actions = { ModelMenu(state = state, onSelectModel = onSelectModel) },
+                actions = {
+                    if (!state.streaming && state.messages.any { it.role == "assistant" }) {
+                        IconButton(onClick = onRegenerate) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Regenerate")
+                        }
+                    }
+                    ModelMenu(state = state, onSelectModel = onSelectModel)
+                },
             )
         },
     ) { padding ->
@@ -83,11 +119,46 @@ fun ChatScreen(
             }
 
             if (state.streaming) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "Generating…",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    IconButton(onClick = onStop) {
+                        Icon(Icons.Default.Close, contentDescription = "Stop")
+                    }
+                }
+            }
+
+            if (state.pendingAttachments.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    state.pendingAttachments.forEach { attachment ->
+                        AssistChip(
+                            onClick = { onRemoveAttachment(attachment.id) },
+                            label = { Text(attachment.fileName ?: attachment.mimeType) },
+                        )
+                    }
+                }
+            }
+
+            attachError?.let { problem ->
                 Text(
-                    text = "Generating…",
+                    text = problem,
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(horizontal = 16.dp),
                 )
             }
 
@@ -97,6 +168,12 @@ fun ChatScreen(
                     .padding(12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                IconButton(
+                    onClick = { picker.launch("image/*") },
+                    enabled = !state.streaming && !state.uploadingAttachment,
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = "Attach image")
+                }
                 OutlinedTextField(
                     value = input,
                     onValueChange = { input = it },
@@ -146,6 +223,14 @@ private fun MessageBubble(message: MessageDto) {
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(top = 4.dp),
                 )
+                if (message.attachments.isNotEmpty()) {
+                    Text(
+                        text = message.attachments.joinToString { it.fileName ?: it.mimeType },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
             }
         }
     }
@@ -173,5 +258,24 @@ private fun ModelMenu(state: UiState, onSelectModel: (String) -> Unit) {
                 },
             )
         }
+    }
+}
+
+/** Matches the server's hard ceiling so oversized picks fail instead of exhausting memory. */
+private const val MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+
+/** Reads at most [limit] bytes, or returns null when the stream is larger or unreadable. */
+private fun readBounded(stream: InputStream?, limit: Int): ByteArray? {
+    if (stream == null) return null
+    return stream.use { source ->
+        val buffer = ByteArray(8 * 1024)
+        val collected = ByteArrayOutputStream()
+        while (true) {
+            val read = source.read(buffer)
+            if (read < 0) break
+            if (collected.size() + read > limit) return null
+            collected.write(buffer, 0, read)
+        }
+        collected.toByteArray()
     }
 }

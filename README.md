@@ -25,7 +25,7 @@ chat experience with a coding agent that operates on GitHub.
 
 | Path        | Contents                                                          |
 | ----------- | ----------------------------------------------------------------- |
-| `backend/`  | Node 20 + TypeScript API: auth, model proxy, chat persistence, GitHub agent |
+| `backend/`  | Node 22+ + TypeScript API: auth, model proxy, chat persistence, GitHub agent |
 | `shared/`   | API contract (`openapi.json`) and model registry (`models.json`)  |
 | `android/`  | Gradle project for the Compose app, its unit/UI tests and lint    |
 | `docs/`     | Architecture, protocol and security notes                        |
@@ -35,7 +35,7 @@ chat experience with a coding agent that operates on GitHub.
 No local Android toolchain is needed or wanted. Useful commands:
 
 ```bash
-# Backend: typecheck, test, run (Node 20+)
+# Backend: typecheck, test, run (Node 22.6+, matching `engines`; CI uses Node 24)
 cd backend && npm ci && npm run typecheck && npm test && npm run dev
 
 # Android: everything runs in CI
@@ -59,3 +59,4 @@ See [`backend/.env.example`](backend/.env.example) and
 | `OPENCODE_OPENROUTER_API_KEY`       | OpenRouter provider key                        |
 | `DATABASE_DIR`                      | Chat/attachment data directory                 |
 | `PORT`                              | HTTP port (default 8080)                       |
+| `TRUST_PROXY`                       | Honour `X-Forwarded-For` for rate limiting (default `false`) |

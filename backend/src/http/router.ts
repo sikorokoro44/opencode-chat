@@ -86,6 +86,13 @@ export class Router {
     return this.routes.map((route) => `${route.method} /${route.segments.join("/")}`);
   }
 
+  /** Registered routes the auth middleware lets through without a token. */
+  publicRouteSignatures(): string[] {
+    return this.routes
+      .filter((route) => route.public)
+      .map((route) => `${route.method} /${route.segments.join("/")}`);
+  }
+
   match(
     method: string,
     path: string,

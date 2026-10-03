@@ -16,7 +16,19 @@ import { clientIdentity, writeJson, writeNoContent } from "../http/respond.ts";
 import type { RequestContext, Router } from "../http/router.ts";
 import type { RouteDependencies } from "./dependencies.ts";
 import type { UserRecord } from "../store/records.ts";
-import { asObject, bool, int, objArray, repoPath, str, strArray } from "../validate.ts";
+import {
+  asObject,
+  assertRepoName,
+  assertSafeRepoPath,
+  bool,
+  idToken,
+  int,
+  objArray,
+  repoPath,
+  str,
+  strArray,
+  type Json,
+} from "../validate.ts";
 import type { ChatStreamEvent } from "../api/types.ts";
 
 export type { RouteDependencies };
@@ -80,9 +92,11 @@ export function registerRoutes(router: Router, deps: RouteDependencies): void {
     int(asObject({ [key]: queryString(ctx, key) }), key, { fallback, min, max });
 
   const guardAuthRate = (ctx: RequestContext, extra = ""): void => {
-    const bucket = deps.authRateLimiter.take(`${clientIdentity(ctx.req)}:${extra}`);
+    const bucket = deps.authRateLimiter.take(`${clientIdentity(ctx.req, deps.config.trustProxy)}:${extra}`);
     if (!bucket.allowed) throw tooManyRequests(bucket.retryAfterMs / 1000);
   };
+  /** Auth failure tracking shares the limiter's identity rules. */
+  const authIdentity = (ctx: RequestContext): string => clientIdentity(ctx.req, deps.config.trustProxy);
 
   // ------------------------------------------------------------------ health
 
@@ -125,10 +139,10 @@ export function registerRoutes(router: Router, deps: RouteDependencies): void {
           password: str(body, "password", { min: 1, max: 512, trim: false }),
           deviceName: str(body, "deviceName", { optional: true, max: 64 }),
         });
-        deps.authDelay.recordSuccess(`${clientIdentity(ctx.req)}:${username.toLowerCase()}`);
+        deps.authDelay.recordSuccess(`${authIdentity(ctx)}:${username.toLowerCase()}`);
         return tokens;
       } catch (error) {
-        const delay = deps.authDelay.recordFailure(`${clientIdentity(ctx.req)}:${username.toLowerCase()}`);
+        const delay = deps.authDelay.recordFailure(`${authIdentity(ctx)}:${username.toLowerCase()}`);
         if (delay > 0) await sleep(delay);
         throw error;
       }
@@ -185,9 +199,9 @@ export function registerRoutes(router: Router, deps: RouteDependencies): void {
     const body = asObject(await ctx.json());
     const chat = deps.chats.createChat(principalOf(ctx).userId, {
       title: str(body, "title", { optional: true, max: 200 }),
-      repository: str(body, "repository", { optional: true, max: 200 }),
+      repository: optionalRepository(body, "repository"),
       branch: str(body, "branch", { optional: true, max: 200 }),
-      projectPath: str(body, "projectPath", { optional: true, max: 512 }),
+      projectPath: optionalProjectPath(body, "projectPath"),
       modelId: str(body, "modelId", { optional: true, max: 64 }),
     });
     writeJson(ctx.res, 201, chat);
@@ -220,11 +234,15 @@ export function registerRoutes(router: Router, deps: RouteDependencies): void {
 
   router.patch("/v1/chats/{chatId}", async (ctx) => {
     const body = asObject(await ctx.json());
+    // The Android client sets the repository context through this endpoint, so
+    // `repository` and `projectPath` are accepted here, not silently dropped.
     return deps.chats.updateChat(principalOf(ctx).userId, str(ctx.params, "chatId", { min: 1, max: 128 }), {
       ...(body["title"] === undefined ? {} : { title: str(body, "title", { max: 200 }) }),
       ...(body["pinned"] === undefined ? {} : { pinned: bool(body, "pinned") }),
       ...(body["modelId"] === undefined ? {} : { modelId: str(body, "modelId", { max: 64 }) }),
       ...(body["branch"] === undefined ? {} : { branch: str(body, "branch", { max: 200 }) }),
+      ...(body["repository"] === undefined ? {} : { repository: optionalRepository(body, "repository") }),
+      ...(body["projectPath"] === undefined ? {} : { projectPath: optionalProjectPath(body, "projectPath") }),
     });
   });
 
@@ -600,6 +618,9 @@ export function registerRoutes(router: Router, deps: RouteDependencies): void {
     if (createPullRequest && !deps.github.writesEnabled) {
       throw forbidden("github_writes_disabled", "server is not configured for repository writes");
     }
+    // Validated here as well as in the service so a malformed owner/repo is rejected
+    // before any credential is resolved or any GitHub call is made.
+    assertRepoName(str(body, "owner", { min: 1, max: 100 }), str(body, "repo", { min: 1, max: 100 }));
     const result = await deps.github.commitFiles({
       user,
       owner: str(body, "owner", { min: 1, max: 100 }),
@@ -627,15 +648,25 @@ export function registerRoutes(router: Router, deps: RouteDependencies): void {
   router.post("/v1/github/agent/run", async (ctx) => {
     const user = userOf(ctx);
     const body = asObject(await ctx.json());
-    const [owner = "", repo = ""] = str(body, "repository", { min: 3, max: 200 }).split("/", 2);
-    if (owner === "" || repo === "") throw badRequest("invalid_repository", "repository must look like owner/name");
+    // `repository` decides which repository the agent tools act on, so it is parsed
+    // strictly: exactly `owner/name`, both halves valid GitHub names. A lenient
+    // split would let `victim/repo/extra` silently address `victim/repo`.
+    const { owner, repo } = parseRepository(str(body, "repository", { min: 3, max: 200 }));
 
     const token = agentToken(ctx);
+    // Resolve the caller's GitHub credential up front. Without it a run could not
+    // read anything, so refusing here stops an unconnected account from burning
+    // provider quota, and guarantees the agent only ever touches a repository with a
+    // credential this account actually holds.
+    deps.github.requireCredential(user, token);
     const allowWrites = bool(body, "allowWrites", false) && deps.github.writesEnabled;
     const branch = str(body, "branch", { optional: true, max: 200 });
     const ref = branch === "" ? await deps.github.defaultBranch(user, owner, repo, token) : branch;
     const modelId = str(body, "modelId", { optional: true, max: 64 });
-    const chatId = str(body, "chatId", { optional: true, max: 128 });
+    // `chatId` arrives in the body, so it is untrusted input: without this check a
+    // caller could seed the agent prompt with another account's chat history.
+    const chatId = str(body, "chatId", { optional: true, max: 64 });
+    if (chatId !== "") deps.chats.requireChat(user.id, chatId);
 
     const messages = deps.chats.buildProviderMessages(
       chatId,
@@ -708,16 +739,21 @@ export function registerRoutes(router: Router, deps: RouteDependencies): void {
     const user = userOf(ctx);
     const body = asObject(await ctx.json());
     const token = agentToken(ctx);
-    await deps.github.recordSessionMemory(user, {
+    // The chat id becomes a GitHub file name and is caller-supplied: it must be a
+    // single path-safe token and it must belong to this account.
+    const chatId = idToken(body, "chatId");
+    deps.chats.requireChat(user.id, chatId);
+    const result = await deps.github.recordSessionMemory(user, {
       owner: str(body, "owner", { min: 1, max: 100 }),
       repo: str(body, "repo", { min: 1, max: 100 }),
       branch: str(body, "branch", { min: 1, max: 200 }),
-      chatId: str(body, "chatId", { min: 1, max: 128 }),
+      chatId,
       title: str(body, "title", { min: 1, max: 200 }),
       summary: str(body, "summary", { min: 1, max: 16_000, trim: false }),
+      messageCount: int(body, "messageCount", { optional: true, fallback: 0, min: 0, max: 10_000 }),
       ...(token === undefined ? {} : { bootstrapToken: token }),
     });
-    writeJson(ctx.res, 201, { stored: true });
+    writeJson(ctx.res, 201, { stored: result.stored, path: result.path, branch: result.branch });
     return undefined;
   });
 }
@@ -726,6 +762,42 @@ export function registerRoutes(router: Router, deps: RouteDependencies): void {
 function queryStringOf(source: Record<string, unknown>, key: string): string {
   const value = source[key];
   return typeof value === "string" ? value : "";
+}
+
+/**
+ * Splits an `owner/name` repository reference. Rejects anything with a different
+ * number of segments so a value like `owner/repo/extra` cannot quietly address a
+ * different repository than the caller named.
+ */
+function parseRepository(value: string): { owner: string; repo: string } {
+  const parts = value.split("/");
+  if (parts.length !== 2) {
+    throw badRequest("invalid_repository", "repository must look like owner/name");
+  }
+  const owner = parts[0] ?? "";
+  const repo = parts[1] ?? "";
+  assertRepoName(owner, repo);
+  return { owner, repo };
+}
+
+/**
+ * Optional repository context stored on a chat.
+ *
+ * These are only echoed back today, but the agent reads chat context, so they are
+ * validated on the way in: an unvalidated `owner/name` or `../..` path stored here
+ * would become a traversal the moment anything acts on it.
+ */
+function optionalRepository(source: Json, key: string, max = 200): string {
+  const value = str(source, key, { optional: true, max });
+  if (value === "") return "";
+  parseRepository(value);
+  return value;
+}
+
+function optionalProjectPath(source: Json, key: string): string {
+  const value = str(source, key, { optional: true, max: 512 });
+  if (value === "") return "";
+  return assertSafeRepoPath(value);
 }
 
 /** Query parameters are copied into an object for the validator. */

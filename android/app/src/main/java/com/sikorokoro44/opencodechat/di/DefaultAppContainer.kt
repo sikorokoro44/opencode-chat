@@ -4,11 +4,13 @@ import android.content.Context
 import android.os.Build
 import com.sikorokoro44.opencodechat.data.auth.KeystoreTokenStore
 import com.sikorokoro44.opencodechat.data.auth.TokenStore
+import com.sikorokoro44.opencodechat.data.prefs.DataStoreSettingsStore
 import com.sikorokoro44.opencodechat.data.prefs.SettingsStore
 import com.sikorokoro44.opencodechat.data.remote.ChatStreamClient
 import com.sikorokoro44.opencodechat.data.remote.OpenCodeApi
 import com.sikorokoro44.opencodechat.data.repository.AuthRepository
 import com.sikorokoro44.opencodechat.data.repository.ChatRepository
+import com.sikorokoro44.opencodechat.data.repository.GithubRepository
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.android.Android
 import io.ktor.client.plugins.HttpTimeout
@@ -38,7 +40,7 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
 
     override val tokenStore: TokenStore by lazy { KeystoreTokenStore(context, json) }
 
-    override val settingsStore: SettingsStore by lazy { SettingsStore(context) }
+    override val settingsStore: SettingsStore by lazy { DataStoreSettingsStore(context) }
 
     override val api: OpenCodeApi by lazy { OpenCodeApi(httpClient, json) }
 
@@ -50,6 +52,10 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
 
     override val chatRepository: ChatRepository by lazy {
         ChatRepository(api, streamClient, authRepository)
+    }
+
+    override val githubRepository: GithubRepository by lazy {
+        GithubRepository(api, authRepository)
     }
 
     private companion object {

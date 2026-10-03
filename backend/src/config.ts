@@ -21,6 +21,13 @@ export interface Config {
   readonly attachmentMaxImageBytes: number;
   readonly requestsPerMinute: number;
   readonly authAttemptsPerMinute: number;
+  /**
+   * When true the deployment sits behind a reverse proxy that overwrites
+   * `X-Forwarded-For`, so the header may be trusted for rate-limit bucketing.
+   * Leave false when the server is reachable directly: otherwise a caller can
+   * mint an unlimited number of rate-limit buckets by varying the header.
+   */
+  readonly trustProxy: boolean;
   /** Bootstrap token required for privileged coding-agent writes. Empty disables the API. */
   readonly adminBootstrapToken: string;
   /** Hex encoded 32 byte key used to encrypt stored GitHub tokens at rest. */
@@ -60,6 +67,15 @@ function readOptional(env: NodeJS.ProcessEnv, key: string): string | undefined {
   const raw = env[key];
   if (raw === undefined || raw.trim() === "") return undefined;
   return raw.trim();
+}
+
+function readBool(env: NodeJS.ProcessEnv, key: string, fallback: boolean): boolean {
+  const raw = env[key];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const normalised = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalised)) return true;
+  if (["0", "false", "no", "off"].includes(normalised)) return false;
+  throw new ConfigError(`${key} must be one of true/false`);
 }
 
 function readInt(env: NodeJS.ProcessEnv, key: string, fallback: number, min: number, max: number): number {
@@ -128,6 +144,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     attachmentMaxImageBytes: readInt(env, "ATTACHMENT_MAX_IMAGE_BYTES", 3 * 1024 * 1024, 1024, 20 * 1024 * 1024),
     requestsPerMinute: readInt(env, "REQUESTS_PER_MINUTE", 120, 1, 100_000),
     authAttemptsPerMinute: readInt(env, "AUTH_ATTEMPTS_PER_MINUTE", 10, 1, 10_000),
+    // Default false: an unset flag must never let a caller pick its own rate-limit
+    // bucket by forging `X-Forwarded-For`.
+    trustProxy: readBool(env, "TRUST_PROXY", false),
     adminBootstrapToken: readOptional(env, "OPENCODE_ADMIN_BOOTSTRAP_TOKEN") ?? "",
     githubTokenEncryptionKey: githubKey ?? "",
     githubServiceToken: readOptional(env, "OPENCODE_GITHUB_TOKEN"),

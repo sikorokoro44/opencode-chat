@@ -124,6 +124,73 @@ test("noCache bypasses the conditional cache", async () => {
   assert.equal(fake.requests[1]?.headers["if-none-match"], undefined);
 });
 
+test("an empty body is never cached, so a later 304 cannot resolve to nothing", async () => {
+  const fake = new FakeFetch().on(HOST, (_request, index) => {
+    if (index === 0) return { body: "", headers: { etag: '"empty"' } };
+    if (index === 1) return { body: JSON.stringify({ late: true }) };
+    return { status: 304, body: "" };
+  });
+  const client = new GitHubClient({ token: "t", baseUrl: BASE, fetchImpl: fake.fetch });
+  const first = await client.request<Record<string, unknown>>("/thing");
+  assert.equal(first.data, undefined, "an empty body has no content to serve");
+  const second = await client.request<Record<string, unknown>>("/thing");
+  // Nothing was cached, so the conditional request is dropped and the resource is
+  // fetched again rather than served as an empty 304 body.
+  assert.equal(fake.requests[1]?.headers["if-none-match"], undefined);
+  assert.deepEqual(second.data, { late: true });
+  assert.equal(second.notModified, false);
+});
+
+test("a cached raw file body survives a 304 without a JSON parse", async () => {
+  // The contents API answers `vnd.github.raw` with plain text, so the cached body is
+  // not JSON and must not go through `JSON.parse`.
+  const fake = new FakeFetch().on(HOST, (request) => {
+    if (request.headers["if-none-match"] === undefined) return { body: "# hello\nnot json", headers: { etag: '"raw"' } };
+    return { status: 304, body: "" };
+  });
+  const client = new GitHubClient({ token: "t", baseUrl: BASE, fetchImpl: fake.fetch });
+  await client.request("/file", { accept: "application/vnd.github.raw+json" });
+  const second = await client.request<string>("/file", { accept: "application/vnd.github.raw+json" });
+  assert.equal(second.notModified, true);
+  assert.equal(second.data, "# hello\nnot json");
+});
+
+test("a 304 with nothing cached retries unconditionally and then fails as an upstream error", async () => {
+  const fake = new FakeFetch().on(HOST, { status: 304, body: "" });
+  const client = new GitHubClient({ token: "t", baseUrl: BASE, fetchImpl: fake.fetch, maxRetries: 0 });
+  await assert.rejects(
+    () => client.request("/thing"),
+    (error: unknown) => {
+      assert.ok(error instanceof GitHubApiError);
+      assert.equal((error as { status?: number }).status, 502, "a bare 304 must never reach the wire as 304");
+      return true;
+    },
+  );
+  // One conditional attempt plus exactly one unconditional retry, then it gives up.
+  assert.equal(fake.requests.length, 2);
+  assert.equal(fake.requests[1]?.headers["if-none-match"], undefined);
+});
+
+test("an expired cache entry is dropped so a 304 can no longer resolve to a stale body", async () => {
+  let now = 1_000;
+  const cache = new EtagCache(8, 60_000, () => now);
+  const fake = new FakeFetch().on(HOST, { body: JSON.stringify({ n: 1 }), headers: { etag: '"e"' } });
+  const client = new GitHubClient({ token: "t", baseUrl: BASE, fetchImpl: fake.fetch, cache });
+  await client.request("/thing");
+  const conditional = () => fake.lastRequest(HOST)?.headers["if-none-match"];
+
+  await client.request("/thing");
+  assert.equal(conditional(), '"e"', "a live entry is reused");
+
+  now += 60_001;
+  await client.request("/thing");
+  assert.equal(
+    conditional(),
+    undefined,
+    "an expired entry must not be sent, or a 304 would serve a stale body",
+  );
+});
+
 test("GitHub errors are mapped to safe internal statuses", async () => {
   const notFound = new GitHubClient({ token: "t", baseUrl: BASE, fetchImpl: new FakeFetch().on(HOST, { status: 404, body: '{"message":"Not Found"}' }).fetch });
   await assert.rejects(
@@ -371,10 +438,119 @@ test("listMemorySessions surfaces only session documents", async () => {
   );
 });
 
+test("a session recorded through the service is readable from the same path and format", async () => {
+  const stored = new Map<string, string>();
+  const fake = new FakeFetch();
+  fake.on(HOST, (request) => {
+    if (request.url.endsWith("/git/ref/heads/main")) return { body: JSON.stringify({ object: { sha: "basesha" } }) };
+    const path = decodeURIComponent(new URL(request.url).pathname).split("/contents/")[1] ?? "";
+    if (request.method === "PUT" && request.url.includes("/contents/")) {
+      const body = request.body as { content: string };
+      stored.set(path, Buffer.from(body.content, "base64").toString("utf8"));
+      return { body: JSON.stringify({ commit: { sha: "s1" } }) };
+    }
+    // A directory listing is derived from the stored documents, exactly like GitHub.
+    const document = stored.get(path);
+    if (document !== undefined) return { body: document, headers: { etag: '"doc"' } };
+    const directory = path.replace(/\/[^/]*$/, "");
+    const entries = [...stored.keys()]
+      .filter((key) => key.startsWith(directory === "" ? "" : `${directory}/`) && !key.slice(directory.length + 1).includes("/"))
+      .map((key) => {
+        const name = key.split("/").pop() ?? key;
+        return { path: key, name, type: "file", size: 1, sha: "x" };
+      });
+    if (entries.length === 0) return { status: 404, body: '{"message":"nf"}' };
+    return { body: JSON.stringify(entries), headers: { etag: '"listing"' } };
+  });
+
+  const svc = service(fake.fetch, { serviceToken: "t" });
+  const linked = user({ githubTokenCipher: new SecretStore(KEY).seal("ghp", "usr_1") });
+  const result = await svc.recordSessionMemory(linked, {
+    owner: "o",
+    repo: "r",
+    branch: "main",
+    chatId: "chat_abc",
+    title: "Refactor the parser",
+    summary: "what happened",
+    messageCount: 7,
+  });
+  assert.equal(result.stored, true);
+  assert.equal(result.branch, "main");
+  // Write and read must agree on the path, otherwise a stored session is invisible.
+  assert.equal(result.path, ".opencode/session-chat_abc.md");
+  assert.deepEqual([...stored.keys()], [".opencode/session-chat_abc.md"]);
+
+  const listed = await svc.listMemorySessions(linked, "o", "r", "main");
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0]?.chatId, "chat_abc");
+  assert.equal(listed[0]?.title, "Refactor the parser");
+  assert.equal(listed[0]?.messageCount, 7);
+  assert.match(listed[0]?.updatedAt ?? "", /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test("session memory defaults to the memory directory when the path has none", () => {
+  const svc = new GitHubService({
+    baseUrl: BASE,
+    bootstrapToken: "",
+    secretStore: new SecretStore(KEY),
+    memoryPath: "PROJECT_MEMORY.md",
+  });
+  assert.equal(svc.sessionDirectory(), "");
+  assert.equal(svc.sessionPath("chat_1"), "session-chat_1.md");
+  assert.throws(() => svc.sessionPath("../escape"), /path-safe token/);
+  assert.throws(() => svc.sessionPath("a/b"), /path-safe token/);
+});
+
+test("recordSessionMemory reports stored:false when GitHub fails and still resolves a branch", async () => {
+  let refReads = 0;
+  const fake = new FakeFetch();
+  fake.on(HOST, (request) => {
+    if (request.url.endsWith("/git/ref/heads/main")) {
+      refReads += 1;
+      // Missing on the first probe so the memory branch is created from the default.
+      return refReads === 1
+        ? { status: 404, body: '{"message":"nf"}' }
+        : { body: JSON.stringify({ object: { sha: "basesha" } }) };
+    }
+    if (request.url.endsWith("/repos/o/r")) return { body: JSON.stringify({ default_branch: "main" }) };
+    if (request.url.endsWith("/git/refs")) return { body: JSON.stringify({ ref: "refs/heads/b" }) };
+    return { body: "{}" };
+  });
+  const svc = service(fake.fetch, { serviceToken: "t" });
+  const linked = user({ githubTokenCipher: new SecretStore(KEY).seal("ghp", "usr_1") });
+
+  const result = await svc.recordSessionMemory(linked, {
+    owner: "o",
+    repo: "r",
+    branch: "main",
+    chatId: "chat_1",
+    title: "t",
+    summary: "s",
+  });
+  assert.equal(result.stored, false, "nothing was committed, so nothing may be claimed as stored");
+  assert.match(result.branch, /memory-/);
+});
+
+test("a malformed GitHub write response is reported, never dereferenced", async () => {
+  // A 2xx with no `commit` object used to crash commitFiles with a TypeError.
+  const fake = new FakeFetch();
+  fake.on(HOST, (request) => {
+    if (request.url.endsWith("/git/ref/heads/main")) return { body: JSON.stringify({ object: { sha: "basesha" } }) };
+    if (request.url.includes("/contents/") && request.method === "GET") return { status: 404, body: '{"message":"nf"}' };
+    return { body: "{}" };
+  });
+  const client = new GitHubClient({ token: "t", baseUrl: BASE, fetchImpl: fake.fetch });
+  const result = await client.commitFiles("o", "r", "main", [{ path: "a.md", content: "x" }], "m");
+  assert.equal(result.commitSha, null);
+  assert.deepEqual(result.committed, []);
+  assert.deepEqual(result.skipped, ["a.md"]);
+});
+
 test("recordSessionMemory commits one session document and is best-effort", async () => {
   const fake = new FakeFetch();
   let putBody: unknown;
   fake.on(HOST, (request) => {
+    if (request.url.endsWith("/git/ref/heads/main")) return { body: JSON.stringify({ object: { sha: "basesha" } }) };
     if (request.url.includes("/contents/") && request.method === "GET") {
       return { status: 404, body: '{"message":"nf"}' };
     }
@@ -395,8 +571,9 @@ test("recordSessionMemory commits one session document and is best-effort", asyn
     summary: "what happened",
   });
   const written = JSON.stringify(putBody);
-  assert.match(written, /email|message/);
-  assert.match(written, /session abc/);
+  assert.match(written, /memory: session abc/);
+  const body = putBody as { content: string };
+  assert.match(Buffer.from(body.content, "base64").toString("utf8"), /# Session title/);
 
   const failing = service(
     new FakeFetch().on(HOST, { status: 500, body: '{"message":"boom"}' }).fetch,

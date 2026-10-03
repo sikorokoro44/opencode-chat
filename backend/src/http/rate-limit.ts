@@ -9,6 +9,12 @@ export interface RateLimiterOptions {
   limit: number;
   windowMs: number;
   now?: () => number;
+  /**
+   * Upper bound on tracked buckets. Identities are server-side, but a deployment
+   * behind a proxy still sees one bucket per client address, so the map is capped
+   * instead of growing for the lifetime of the process.
+   */
+  maxBuckets?: number;
 }
 
 interface Bucket {
@@ -21,11 +27,13 @@ export class RateLimiter {
   private readonly limit: number;
   private readonly windowMs: number;
   private readonly now: () => number;
+  private readonly maxBuckets: number;
 
   constructor(options: RateLimiterOptions) {
     this.limit = options.limit;
     this.windowMs = options.windowMs;
     this.now = options.now ?? (() => Date.now());
+    this.maxBuckets = options.maxBuckets ?? 50_000;
   }
 
   /** Returns the remaining allowance and the wait before one more token is available. */
@@ -39,10 +47,26 @@ export class RateLimiter {
     this.buckets.set(key, { tokens, updatedAt: timestamp });
 
     if (replenished >= cost) {
+      this.evictIfNeeded();
       return { allowed: true, remaining: Math.floor(replenished - cost), retryAfterMs: 0 };
     }
     const deficit = cost - replenished;
+    this.evictIfNeeded();
     return { allowed: false, remaining: 0, retryAfterMs: Math.ceil(deficit / refillRate) };
+  }
+
+  /**
+   * Drops buckets that have fully refilled (inactive for a whole window) and, if
+   * that is not enough, the whole map: an exhausted bucket has no protection left
+   * to lose, so forgetting it is the safe failure mode.
+   */
+  private evictIfNeeded(): void {
+    if (this.buckets.size < this.maxBuckets) return;
+    const timestamp = this.now();
+    for (const [key, bucket] of this.buckets) {
+      if (timestamp - bucket.updatedAt >= this.windowMs) this.buckets.delete(key);
+    }
+    if (this.buckets.size >= this.maxBuckets) this.buckets.clear();
   }
 
   reset(key?: string): void {
@@ -64,11 +88,13 @@ export class AuthDelay {
   private readonly baseMs: number;
   private readonly maxMs: number;
   private readonly now: () => number;
+  private readonly maxEntries: number;
 
-  constructor(baseMs = 250, maxMs = 8_000, now: () => number = () => Date.now()) {
+  constructor(baseMs = 250, maxMs = 8_000, now: () => number = () => Date.now(), maxEntries = 50_000) {
     this.baseMs = baseMs;
     this.maxMs = maxMs;
     this.now = now;
+    this.maxEntries = maxEntries;
   }
 
   /** Milliseconds the caller should wait before responding. */
@@ -87,8 +113,19 @@ export class AuthDelay {
     const entry = this.failures.get(key) ?? { count: 0, lastAt: this.now() };
     entry.count = Math.min(entry.count + 1, 10);
     entry.lastAt = this.now();
+    if (!this.failures.has(key)) this.evictIfNeeded();
     this.failures.set(key, entry);
     return Math.min(this.baseMs * 2 ** (entry.count - 1), this.maxMs);
+  }
+
+  /** Bounds the table: identities are server-side, but not for ever. */
+  private evictIfNeeded(): void {
+    if (this.failures.size < this.maxEntries) return;
+    const cutoff = this.now() - 60_000;
+    for (const [key, entry] of this.failures) {
+      if (entry.lastAt <= cutoff) this.failures.delete(key);
+    }
+    if (this.failures.size >= this.maxEntries) this.failures.clear();
   }
 
   recordSuccess(key: string): void {

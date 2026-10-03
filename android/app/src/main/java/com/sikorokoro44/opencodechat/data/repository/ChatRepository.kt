@@ -1,5 +1,6 @@
 package com.sikorokoro44.opencodechat.data.repository
 
+import com.sikorokoro44.opencodechat.data.model.AttachmentDto
 import com.sikorokoro44.opencodechat.data.model.ChatDetailResponse
 import com.sikorokoro44.opencodechat.data.model.ChatDto
 import com.sikorokoro44.opencodechat.data.model.ChatStreamEvent
@@ -7,14 +8,18 @@ import com.sikorokoro44.opencodechat.data.model.CreateChatRequest
 import com.sikorokoro44.opencodechat.data.model.GithubStatusDto
 import com.sikorokoro44.opencodechat.data.model.MeResponse
 import com.sikorokoro44.opencodechat.data.model.ModelsResponse
+import com.sikorokoro44.opencodechat.data.model.UpdateChatRequest
+import com.sikorokoro44.opencodechat.data.model.UploadAttachmentRequest
 import com.sikorokoro44.opencodechat.data.remote.ApiResult
 import com.sikorokoro44.opencodechat.data.remote.ChatStreamClient
 import com.sikorokoro44.opencodechat.data.remote.OpenCodeApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
 
-/** Chat, model, profile and GitHub operations on behalf of the signed-in user. */
+/** Chat, model, profile and attachment operations on behalf of the signed-in user. */
 class ChatRepository(
     private val api: OpenCodeApi,
     private val streamClient: ChatStreamClient,
@@ -27,13 +32,32 @@ class ChatRepository(
                 is ApiResult.Failure -> result
             } }
 
-    suspend fun createChat(title: String?): ApiResult<ChatDto> =
+    suspend fun createChat(
+        title: String? = null,
+        repository: String? = null,
+        branch: String? = null,
+        projectPath: String? = null,
+        modelId: String? = null,
+    ): ApiResult<ChatDto> =
         auth.withValidToken { base, token ->
-            api.createChat(base, token, CreateChatRequest(title = title))
+            api.createChat(
+                base,
+                token,
+                CreateChatRequest(
+                    title = title,
+                    repository = repository,
+                    branch = branch,
+                    projectPath = projectPath,
+                    modelId = modelId,
+                ),
+            )
         }
 
     suspend fun getChat(chatId: String): ApiResult<ChatDetailResponse> =
         auth.withValidToken { base, token -> api.getChat(base, token, chatId) }
+
+    suspend fun updateChat(chatId: String, request: UpdateChatRequest): ApiResult<ChatDto> =
+        auth.withValidToken { base, token -> api.updateChat(base, token, chatId, request) }
 
     suspend fun deleteChat(chatId: String): ApiResult<Unit> =
         auth.withValidToken { base, token -> api.deleteChat(base, token, chatId) }
@@ -47,19 +71,41 @@ class ChatRepository(
     suspend fun githubStatus(): ApiResult<GithubStatusDto> =
         auth.withValidToken { base, token -> api.githubStatus(base, token) }
 
-    suspend fun connectGithub(githubToken: String): ApiResult<Unit> =
-        auth.withValidToken { base, token -> api.connectGithub(base, token, githubToken) }
-
-    suspend fun disconnectGithub(): ApiResult<Unit> =
-        auth.withValidToken { base, token -> api.disconnectGithub(base, token) }
+    @OptIn(ExperimentalEncodingApi::class)
+    suspend fun uploadAttachment(
+        data: ByteArray,
+        mimeType: String,
+        fileName: String?,
+        chatId: String? = null,
+    ): ApiResult<AttachmentDto> {
+        val encoded = Base64.encode(data)
+        return auth.withValidToken { base, token ->
+            api.uploadAttachment(base, token, UploadAttachmentRequest(encoded, mimeType, fileName, chatId))
+        }
+    }
 
     /** Streaming is cold: collection starts the request and can be cancelled. */
-    fun stream(chatId: String, content: String, modelId: String?): Flow<ChatStreamEvent> = flow {
+    fun stream(
+        chatId: String,
+        content: String,
+        modelId: String?,
+        attachmentIds: List<String> = emptyList(),
+    ): Flow<ChatStreamEvent> = flow {
         val tokens = auth.currentTokens()
         if (tokens == null) {
             emit(ChatStreamEvent(type = "error", code = "unauthorized", message = "not signed in"))
             return@flow
         }
-        emitAll(streamClient.stream(auth.baseUrl(), tokens.accessToken, chatId, content, modelId))
+        emitAll(streamClient.stream(auth.baseUrl(), tokens.accessToken, chatId, content, modelId, attachmentIds))
+    }
+
+    /** Re-runs the last user turn, replacing the previous answer. */
+    fun regenerate(chatId: String, modelId: String?): Flow<ChatStreamEvent> = flow {
+        val tokens = auth.currentTokens()
+        if (tokens == null) {
+            emit(ChatStreamEvent(type = "error", code = "unauthorized", message = "not signed in"))
+            return@flow
+        }
+        emitAll(streamClient.regenerate(auth.baseUrl(), tokens.accessToken, chatId, modelId))
     }
 }

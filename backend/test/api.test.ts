@@ -456,6 +456,63 @@ test("global rate limiting returns 429 with retry-after", async () => {
   }
 });
 
+test("chat repository context is validated on create and update", async () => {
+  const app = await boot(new FakeFetch());
+  try {
+    const account = await registerAccount(app.baseUrl, "oscar");
+
+    const created = await request<{ id: string; repository: string; projectPath: string }>(app.baseUrl, "/v1/chats", {
+      token: account.token,
+      body: { title: "ctx", repository: "octocat/hello-world", projectPath: "app/src" },
+    });
+    assert.equal(created.status, 201);
+    assert.equal(created.body.repository, "octocat/hello-world");
+    assert.equal(created.body.projectPath, "app/src");
+
+    // The Android client sets this through PATCH; it must be stored, not dropped.
+    const patched = await request<{ repository: string; branch: string; projectPath: string }>(
+      app.baseUrl,
+      `/v1/chats/${created.body.id}`,
+      {
+        method: "PATCH",
+        token: account.token,
+        body: { repository: "octocat/other-repo", branch: "main", projectPath: "app" },
+      },
+    );
+    assert.equal(patched.status, 200);
+    assert.equal(patched.body.repository, "octocat/other-repo");
+    assert.equal(patched.body.branch, "main");
+
+    const reread = await request<{ chat: { repository: string; projectPath: string } }>(
+      app.baseUrl,
+      `/v1/chats/${created.body.id}`,
+      { token: account.token },
+    );
+    assert.equal(reread.body.chat.repository, "octocat/other-repo");
+    assert.equal(reread.body.chat.projectPath, "app");
+
+    for (const repository of ["octocat/hello-world/extra", "octocat/../etc", "just-a-name"]) {
+      const rejected = await request(app.baseUrl, `/v1/chats/${created.body.id}`, {
+        method: "PATCH",
+        token: account.token,
+        body: { repository },
+      });
+      assert.equal(rejected.status, 400, `repository "${repository}" must be rejected`);
+    }
+    for (const projectPath of ["../../etc", "/abs"]) {
+      const rejected = await request(app.baseUrl, `/v1/chats/${created.body.id}`, {
+        method: "PATCH",
+        token: account.token,
+        body: { projectPath },
+      });
+      assert.equal(rejected.status, 400, `projectPath "${projectPath}" must be rejected`);
+    }
+  } finally {
+    await app.close();
+    await app.cleanup();
+  }
+});
+
 test("GitHub connect, status, repos and disconnect", async () => {
   const fake = new FakeFetch();
   fake.on("github.test/user", () => ({ body: JSON.stringify({ login: "octocat" }) }));
@@ -510,6 +567,7 @@ test("GitHub connect, status, repos and disconnect", async () => {
 test("POST /v1/github/memory/sessions stores one session document", async () => {
   const fake = new FakeFetch();
   fake.on("github.test", (request) => {
+    if (request.url.endsWith("/git/ref/heads/main")) return { body: JSON.stringify({ object: { sha: "basesha" } }) };
     if (request.url.includes("/contents/") && request.method === "GET") {
       return { status: 404, body: '{"message":"nf"}' };
     }
@@ -520,27 +578,39 @@ test("POST /v1/github/memory/sessions stores one session document", async () => 
   const app = await boot(fake);
   try {
     const account = await registerAccount(app.baseUrl, "nina");
+    const chat = await request<{ id: string }>(app.baseUrl, "/v1/chats", {
+      token: account.token,
+      body: { title: "Session" },
+    });
     await request(app.baseUrl, "/v1/github/connect", {
       token: account.token,
       body: { token: "ghp_abcdefghijklmnopqrstuvwxyz012345" },
     });
 
-    const stored = await request<{ stored: boolean }>(app.baseUrl, "/v1/github/memory/sessions", {
-      method: "POST",
-      token: account.token,
-      body: {
-        owner: "octocat",
-        repo: "hello-world",
-        branch: "main",
-        chatId: "chat1",
-        title: "Session",
-        summary: "what happened",
+    const stored = await request<{ stored: boolean; path: string; branch: string }>(
+      app.baseUrl,
+      "/v1/github/memory/sessions",
+      {
+        method: "POST",
+        token: account.token,
+        body: {
+          owner: "octocat",
+          repo: "hello-world",
+          branch: "main",
+          chatId: chat.body.id,
+          title: "Session",
+          summary: "what happened",
+          messageCount: 4,
+        },
       },
-    });
+    );
     assert.equal(stored.status, 201);
     assert.equal(stored.body.stored, true);
+    // The write must use the same path the listing reads, otherwise it is invisible.
+    assert.equal(stored.body.path, `.opencode/session-${chat.body.id}.md`);
+    assert.equal(stored.body.branch, "main");
     const put = fake.requests.find((entry) => entry.method === "PUT" && entry.url.includes("/contents/"));
-    assert.ok(put && put.url.includes("session-chat1.md"));
+    assert.ok(put && put.url.includes(`session-${chat.body.id}.md`));
   } finally {
     await app.close();
     await app.cleanup();

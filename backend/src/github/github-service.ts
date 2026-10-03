@@ -10,7 +10,7 @@
 
 import { newId, nowIso } from "../ids.ts";
 import { HttpError, badRequest, conflict, forbidden, unavailable } from "../http/errors.ts";
-import { assertRepoName, assertSafeRepoPath } from "../validate.ts";
+import { ID_TOKEN, assertRepoName, assertSafeRepoPath } from "../validate.ts";
 import { EtagCache, GitHubApiError, GitHubClient } from "./github-client.ts";
 import { SecretStore } from "./secret-box.ts";
 import type { AgentActionSummary, Repo, RepoEntry } from "../api/types.ts";
@@ -55,6 +55,67 @@ export interface CommitFilesResult {
 
 const MAX_WRITE_BYTES = 400_000;
 const MAX_FILES_PER_COMMIT = 20;
+/** Upper bound on documents read when listing session memory for one repository. */
+const MAX_LISTED_SESSIONS = 50;
+const MAX_SESSION_BYTES = 64 * 1024;
+
+/** File-name convention shared by the write and the read side of session memory. */
+const SESSION_PREFIX = "session-";
+const SESSION_FILE = /^session-[A-Za-z0-9_-]{1,64}\.md$/;
+
+/**
+ * Session-document metadata keys. `renderSessionDocument` writes exactly these and
+ * `parseSessionDocument` reads exactly these, so a recorded session always lists with
+ * the metadata it was written with.
+ */
+const META = { chat: "chat", updated: "updated", messages: "messages" } as const;
+
+function assertSessionId(chatId: string): string {
+  if (!ID_TOKEN.test(chatId)) {
+    throw badRequest("invalid_field", "chatId must be a single path-safe token");
+  }
+  return chatId;
+}
+
+function renderSessionDocument(input: {
+  chatId: string;
+  title: string;
+  updatedAt: string;
+  messageCount: number;
+  summary: string;
+}): string {
+  return [
+    `# ${input.title.replace(/\s+/g, " ").trim().slice(0, 200)}`,
+    "",
+    `${META.chat}: ${input.chatId}`,
+    `${META.updated}: ${input.updatedAt}`,
+    `${META.messages}: ${input.messageCount}`,
+    "",
+    input.summary,
+    "",
+  ].join("\n");
+}
+
+/**
+ * Reads back the metadata written by `renderSessionDocument`. Unknown or hand-edited
+ * documents degrade to empty values rather than failing the listing.
+ */
+function parseSessionDocument(content: string): { title: string; updatedAt: string; messageCount: number } {
+  const result = { title: "", updatedAt: "", messageCount: 0 };
+  const lines = content.split(/\r?\n/);
+  const heading = lines[0] ?? "";
+  if (heading.startsWith("# ")) result.title = heading.slice(2).trim();
+  for (const line of lines.slice(1)) {
+    if (line === "") continue;
+    const separator = line.indexOf(":");
+    if (separator <= 0) break; // metadata block ended: the summary follows
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (key === META.updated) result.updatedAt = value;
+    else if (key === META.messages) result.messageCount = Number.parseInt(value, 10) || 0;
+  }
+  return result;
+}
 
 export class GitHubService {
   private readonly baseUrl: string;
@@ -105,6 +166,16 @@ export class GitHubService {
       return { token: this.secretStore.open(user.githubTokenCipher, user.id), source: "user" };
     }
     throw forbidden("github_not_connected", "connect a GitHub token before using agent operations");
+  }
+
+  /**
+   * Authorisation gate for agent entry points: resolves the caller's credential and
+   * fails fast when there is none. Called before any model or GitHub work so an
+   * unconnected account can neither reach another account's repository nor spend
+   * provider quota on a run that could not do anything.
+   */
+  requireCredential(user: UserRecord, presentedBootstrapToken?: string): GitHubCredential {
+    return this.credentialFor(user, presentedBootstrapToken).source;
   }
 
   private client(token: string): GitHubClient {
@@ -276,6 +347,23 @@ export class GitHubService {
 
   // ---------------------------------------------------------------- memory
 
+  /**
+   * Directory that holds the memory documents: the directory of `memoryPath`, so
+   * project memory and session memory always live together. Both the read and the
+   * write side derive their paths from here, which is what keeps them consistent.
+   */
+  sessionDirectory(): string {
+    const separator = this.memoryPath.lastIndexOf("/");
+    return separator === -1 ? "" : this.memoryPath.slice(0, separator);
+  }
+
+  /** Canonical file name for one chat's session document. */
+  sessionPath(chatId: string): string {
+    const directory = this.sessionDirectory();
+    const name = `session-${assertSessionId(chatId)}.md`;
+    return directory === "" ? name : `${directory}/${name}`;
+  }
+
   /** Reads the GitHub-first project memory document. */
   async readMemory(
     user: UserRecord,
@@ -325,21 +413,7 @@ export class GitHubService {
 
     const credential = this.credentialFor(user, input.bootstrapToken);
     const client = this.client(credential.token);
-
-    let branch = input.branch;
-    let created = false;
-    try {
-      await client.getRef(input.owner, input.repo, branch);
-    } catch (error) {
-      if (error instanceof GitHubApiError && error.githubStatus === 404) {
-        const base = await client.defaultBranch(input.owner, input.repo);
-        branch = `${this.branchPrefix}/memory-${newId("m").slice(2, 8)}`;
-        await client.createBranch(input.owner, input.repo, branch, base);
-        created = true;
-      } else {
-        throw error;
-      }
-    }
+    const { branch, created } = await this.resolveMemoryBranch(client, input.owner, input.repo, input.branch);
 
     const result = await client.commitFiles(input.owner, input.repo, branch, [{ path, content: input.content }], input.commitMessage);
     const action: AgentActionSummary = {
@@ -362,23 +436,37 @@ export class GitHubService {
     bootstrapToken?: string,
   ): Promise<{ chatId: string; title: string; updatedAt: string; messageCount: number }[]> {
     assertRepoName(owner, repo);
-    const directory = this.memoryPath.slice(0, this.memoryPath.lastIndexOf("/")) || ".";
+    const directory = this.sessionDirectory();
     assertSafeRepoPath(directory);
     const credential = this.credentialFor(user, bootstrapToken);
+    const client = this.client(credential.token);
+    let entries: RepoEntry[];
     try {
-      const listing = await this.client(credential.token).listContents(owner, repo, directory, ref);
-      return listing.entries
-        .filter((entry) => entry.type === "file" && entry.name.startsWith("session-") && entry.name.endsWith(".md"))
-        .map((entry) => ({
-          chatId: entry.name.slice("session-".length, -".md".length),
-          title: entry.name,
-          updatedAt: "",
-          messageCount: 0,
-        }));
+      const listing = await client.listContents(owner, repo, directory, ref);
+      entries = listing.entries.filter((entry) => entry.type === "file" && SESSION_FILE.test(entry.name));
     } catch (error) {
       if (error instanceof GitHubApiError && error.githubStatus === 404) return [];
       throw error;
     }
+
+    // Bounded so a repository with thousands of session documents cannot turn one
+    // request into thousands of GitHub reads; ETag caching makes the repeat cheap.
+    const page = entries.slice(0, MAX_LISTED_SESSIONS);
+    const sessions = await Promise.all(
+      page.map(async (entry) => {
+        const chatId = entry.name.slice(SESSION_PREFIX.length, -".md".length);
+        const base = { chatId, title: entry.name, updatedAt: "", messageCount: 0 };
+        try {
+          const document = await client.readTextFile(owner, repo, this.sessionPath(chatId), ref, MAX_SESSION_BYTES);
+          return { ...base, ...parseSessionDocument(document.content) };
+        } catch (error) {
+          // A document that cannot be read is still listed; metadata stays empty.
+          if (error instanceof GitHubApiError) return base;
+          throw error;
+        }
+      }),
+    );
+    return sessions;
   }
 
   /** Stores an encrypted copy of the user's GitHub token after validating it. */
@@ -409,7 +497,12 @@ export class GitHubService {
     };
   }
 
-  /** Records session memory into GitHub. Best-effort: never fails the chat. */
+  /**
+   * Stores one session document. Writes to the same path `listMemorySessions` reads
+   * and in the same document format, so a recorded session is always listable.
+   * Best-effort: a GitHub failure never fails the chat, but the reported result says
+   * what actually happened.
+   */
   async recordSessionMemory(
     user: UserRecord,
     input: {
@@ -419,31 +512,67 @@ export class GitHubService {
       chatId: string;
       title: string;
       summary: string;
+      messageCount?: number;
       bootstrapToken?: string;
     },
-  ): Promise<void> {
+  ): Promise<{ path: string; branch: string; stored: boolean }> {
     assertRepoName(input.owner, input.repo);
-    const path = `sessions/session-${input.chatId}.md`;
+    const path = this.sessionPath(input.chatId);
     assertSafeRepoPath(path);
     const credential = this.credentialFor(user, input.bootstrapToken);
-    const content = [
-      `# ${input.title}`,
-      "",
-      `updated: ${nowIso()}`,
-      `chat: ${input.chatId}`,
-      "",
-      input.summary,
-      "",
-    ].join("\n");
+    const client = this.client(credential.token);
+    const content = renderSessionDocument({
+      chatId: input.chatId,
+      title: input.title,
+      updatedAt: nowIso(),
+      messageCount: input.messageCount ?? 0,
+      summary: input.summary,
+    });
+
+    let branch = input.branch;
     try {
-      const client = this.client(credential.token);
-      await client.commitFiles(input.owner, input.repo, input.branch, [{ path, content }], `memory: session ${input.chatId}`);
+      // Session memory is written to a branch the caller named, so the branch has to
+      // exist; creating it from the default branch keeps the write from being
+      // silently dropped (the previous hard-coded path never existed at all).
+      const resolved = await this.resolveMemoryBranch(client, input.owner, input.repo, input.branch);
+      branch = resolved.branch;
+      const result = await client.commitFiles(
+        input.owner,
+        input.repo,
+        branch,
+        [{ path, content }],
+        `memory: session ${input.chatId}`,
+      );
+      return { path, branch, stored: result.commitSha !== null };
     } catch (error) {
       if (error instanceof GitHubApiError) {
-        // Memory is advisory; surface nothing to the chat user.
-        return;
+        // Memory is advisory; surface nothing about GitHub to the chat user.
+        return { path, branch, stored: false };
       }
       throw error;
+    }
+  }
+
+  /**
+   * Returns the branch when it exists, otherwise creates `prefix/memory-<id>` from the
+   * repository default branch. Shared by project memory and session memory so both
+   * land on a branch that really exists.
+   */
+  private async resolveMemoryBranch(
+    client: GitHubClient,
+    owner: string,
+    repo: string,
+    branch: string,
+  ): Promise<{ branch: string; created: boolean }> {
+    try {
+      await client.getRef(owner, repo, branch);
+      return { branch, created: false };
+    } catch (error) {
+      if (!(error instanceof GitHubApiError) || error.githubStatus !== 404) throw error;
+      const base = await client.defaultBranch(owner, repo);
+      const created = `${this.branchPrefix}/memory-${newId("m").slice(2, 8)}`;
+      await client.createBranch(owner, repo, created, base);
+      return { branch: created, created: true };
     }
   }
 }

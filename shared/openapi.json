@@ -6,6 +6,7 @@
     "description": "Server-side API for the opencode-chat Android app. Holds every secret, proxies free AI models (Big Pickle primary with automatic free-model fallback), persists chats, and performs GitHub coding-agent operations. The Android client never embeds credentials."
   },
   "servers": [{ "url": "https://api.opencode.chat" }],
+  "security": [{ "bearerAuth": [] }],
   "components": {
     "securitySchemes": {
       "bearerAuth": { "type": "http", "scheme": "bearer", "bearerFormat": "JWT" }
@@ -128,6 +129,36 @@
           "description": { "type": "string", "nullable": true },
           "updatedAt": { "type": "string", "nullable": true },
           "language": { "type": "string", "nullable": true }
+        }
+      },
+      "Branch": {
+        "type": "object",
+        "required": ["name", "sha"],
+        "properties": {
+          "name": { "type": "string" },
+          "sha": { "type": "string" }
+        }
+      },
+      "RepoEntry": {
+        "type": "object",
+        "required": ["path", "name", "type"],
+        "properties": {
+          "path": { "type": "string" },
+          "name": { "type": "string" },
+          "type": { "type": "string", "enum": ["file", "dir"] },
+          "size": { "type": "integer" },
+          "sha": { "type": "string" }
+        }
+      },
+      "SessionMemory": {
+        "type": "object",
+        "description": "One session document written next to the project memory file.",
+        "required": ["chatId", "title", "updatedAt", "messageCount"],
+        "properties": {
+          "chatId": { "type": "string" },
+          "title": { "type": "string" },
+          "updatedAt": { "type": "string" },
+          "messageCount": { "type": "integer" }
         }
       },
       "SseEvent": {
@@ -343,8 +374,26 @@
         }
       },
       "patch": {
-        "summary": "Rename or pin a chat",
+        "summary": "Rename, pin, or set the repository context of a chat",
         "parameters": [{ "name": "chatId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": { "type": "string", "maxLength": 200 },
+                  "pinned": { "type": "boolean" },
+                  "modelId": { "type": "string", "maxLength": 64 },
+                  "repository": { "type": "string", "description": "Exactly `owner/name`", "maxLength": 200 },
+                  "branch": { "type": "string", "maxLength": 200 },
+                  "projectPath": { "type": "string", "description": "Repository-relative path", "maxLength": 512 }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Updated",
@@ -476,6 +525,49 @@
         }
       }
     },
+    "/v1/github/connect": {
+      "post": {
+        "summary": "Store a GitHub token, encrypted, for this account",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["token"],
+                "properties": { "token": { "type": "string", "minLength": 20, "maxLength": 255 } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["connected", "login", "connectedAt"],
+                  "properties": {
+                    "connected": { "type": "boolean" },
+                    "login": { "type": "string" },
+                    "connectedAt": { "type": "string", "format": "date-time" }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "GitHub rejected the token",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Forget the stored GitHub token",
+        "responses": { "204": { "description": "Disconnected" } }
+      }
+    },
     "/v1/github/repos": {
       "get": {
         "summary": "List repositories the account can access",
@@ -563,9 +655,88 @@
         }
       }
     },
+    "/v1/github/repos/{owner}/{repo}/branches": {
+      "get": {
+        "summary": "List branches of a repository",
+        "parameters": [
+          { "name": "owner", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "repo", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Branches",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "branches": { "type": "array", "items": { "$ref": "#/components/schemas/Branch" } } }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/github/repos/{owner}/{repo}/search": {
+      "get": {
+        "summary": "Search code within one repository",
+        "parameters": [
+          { "name": "owner", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "repo", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "q", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 256 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching files",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "results": { "type": "array", "items": { "$ref": "#/components/schemas/RepoEntry" } } }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/github/agent/commit": {
       "post": {
         "summary": "Coding-agent write: create a branch, commit files and optionally open a pull request",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["owner", "repo", "baseBranch", "commitMessage", "files"],
+                "properties": {
+                  "owner": { "type": "string", "maxLength": 100 },
+                  "repo": { "type": "string", "maxLength": 100 },
+                  "baseBranch": { "type": "string", "maxLength": 200 },
+                  "branch": { "type": "string", "maxLength": 200 },
+                  "commitMessage": { "type": "string", "minLength": 1, "maxLength": 400 },
+                  "createPullRequest": { "type": "boolean", "default": false },
+                  "pullRequestTitle": { "type": "string", "maxLength": 200 },
+                  "pullRequestBody": { "type": "string", "maxLength": 8000 },
+                  "files": {
+                    "type": "array",
+                    "maxItems": 20,
+                    "items": {
+                      "type": "object",
+                      "required": ["path", "content"],
+                      "properties": {
+                        "path": { "type": "string", "maxLength": 1024 },
+                        "content": { "type": "string" },
+                        "message": { "type": "string", "maxLength": 400 }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "201": {
             "description": "Committed",
@@ -583,6 +754,59 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "Writes are disabled, or the account has no GitHub credential",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      }
+    },
+    "/v1/github/agent/run": {
+      "post": {
+        "summary": "Coding-agent read/write run against one repository, using the caller's own GitHub credential",
+        "description": "Refused with `github_not_connected` before any provider call when the account has no GitHub credential. `chatId` is optional and must name a chat owned by the caller.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["repository", "prompt"],
+                "properties": {
+                  "repository": { "type": "string", "description": "Exactly `owner/name`", "minLength": 3, "maxLength": 200 },
+                  "prompt": { "type": "string", "minLength": 1, "maxLength": 16000 },
+                  "branch": { "type": "string", "maxLength": 200 },
+                  "chatId": { "type": "string", "maxLength": 64 },
+                  "modelId": { "type": "string", "maxLength": 64 },
+                  "allowWrites": { "type": "boolean", "default": false }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Run finished",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "modelId": { "type": "string" },
+                    "text": { "type": "string" },
+                    "steps": { "type": "integer" },
+                    "charactersStreamed": { "type": "integer" },
+                    "agentActions": { "type": "array", "items": { "$ref": "#/components/schemas/AgentAction" } },
+                    "usage": { "$ref": "#/components/schemas/Usage" }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "No GitHub credential, so the run was refused before spending provider quota",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
           }
         }
       }
@@ -591,9 +815,9 @@
       "get": {
         "summary": "Read GitHub-first project memory",
         "parameters": [
-          { "name": "owner", "in": "query", "schema": { "type": "string" } },
-          { "name": "repo", "in": "query", "schema": { "type": "string" } },
-          { "name": "path", "in": "query", "schema": { "type": "string" } }
+          { "name": "owner", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "repo", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "ref", "in": "query", "schema": { "type": "string" } }
         ],
         "responses": {
           "200": {
@@ -616,6 +840,24 @@
       },
       "put": {
         "summary": "Write GitHub-first project memory",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["owner", "repo", "branch", "content"],
+                "properties": {
+                  "owner": { "type": "string", "maxLength": 100 },
+                  "repo": { "type": "string", "maxLength": 100 },
+                  "branch": { "type": "string", "maxLength": 200 },
+                  "content": { "type": "string", "minLength": 1, "maxLength": 400000 },
+                  "commitMessage": { "type": "string", "maxLength": 400 }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Saved",
@@ -639,8 +881,9 @@
       "get": {
         "summary": "List chat sessions recorded in GitHub-first memory",
         "parameters": [
-          { "name": "owner", "in": "query", "schema": { "type": "string" } },
-          { "name": "repo", "in": "query", "schema": { "type": "string" } }
+          { "name": "owner", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "repo", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "ref", "in": "query", "schema": { "type": "string" } }
         ],
         "responses": {
           "200": {
@@ -649,20 +892,7 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "properties": {
-                    "sessions": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "chatId": { "type": "string" },
-                          "title": { "type": "string" },
-                          "updatedAt": { "type": "string" },
-                          "messageCount": { "type": "integer" }
-                        }
-                      }
-                    }
-                  }
+                  "properties": { "sessions": { "type": "array", "items": { "$ref": "#/components/schemas/SessionMemory" } } }
                 }
               }
             }
@@ -671,14 +901,47 @@
       },
       "post": {
         "summary": "Record a chat session in GitHub-first memory",
-        "responses": {
-          "201": {
-            "description": "Stored",
-            "content": {
-              "application/json": {
-                "schema": { "type": "object", "properties": { "stored": { "type": "boolean" } } }
+        "description": "`chatId` must name a chat owned by the caller and is used as a single path segment in the document name. Recording is best-effort: `stored` is false when the commit did not succeed.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["owner", "repo", "branch", "chatId", "title", "summary"],
+                "properties": {
+                  "owner": { "type": "string", "maxLength": 100 },
+                  "repo": { "type": "string", "maxLength": 100 },
+                  "branch": { "type": "string", "maxLength": 200 },
+                  "chatId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
+                  "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+                  "summary": { "type": "string", "minLength": 1, "maxLength": 16000 },
+                  "messageCount": { "type": "integer", "minimum": 0, "maximum": 10000 }
+                }
               }
             }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["stored", "path", "branch"],
+                  "properties": {
+                    "stored": { "type": "boolean" },
+                    "path": { "type": "string" },
+                    "branch": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such chat for this account",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
           }
         }
       }

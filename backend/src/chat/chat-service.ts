@@ -100,7 +100,7 @@ export class ChatService {
   updateChat(
     userId: string,
     chatId: string,
-    patch: { title?: string; pinned?: boolean; modelId?: string; branch?: string },
+    patch: { title?: string; pinned?: boolean; modelId?: string; branch?: string; repository?: string; projectPath?: string },
   ): Chat {
     const chat = this.requireChat(userId, chatId);
     if (patch.title !== undefined) {
@@ -118,6 +118,10 @@ export class ChatService {
       chat.modelId = patch.modelId;
     }
     if (patch.branch !== undefined) chat.branch = patch.branch;
+    // Repository context is set through this endpoint by the Android client, so it is
+    // persisted here rather than accepted and dropped.
+    if (patch.repository !== undefined) chat.repository = patch.repository;
+    if (patch.projectPath !== undefined) chat.projectPath = patch.projectPath;
     chat.updatedAt = this.timestamp();
     this.database.chats.put(chat);
     const messages = this.messagesOf(chat.id);

@@ -1,21 +1,41 @@
 package com.sikorokoro44.opencodechat.data.remote
 
+import com.sikorokoro44.opencodechat.data.model.AgentCommitRequest
+import com.sikorokoro44.opencodechat.data.model.AgentCommitResponse
+import com.sikorokoro44.opencodechat.data.model.AgentRunRequest
+import com.sikorokoro44.opencodechat.data.model.AgentRunResponse
+import com.sikorokoro44.opencodechat.data.model.AttachmentDto
 import com.sikorokoro44.opencodechat.data.model.AuthResponse
+import com.sikorokoro44.opencodechat.data.model.BranchListResponse
 import com.sikorokoro44.opencodechat.data.model.ChatDetailResponse
 import com.sikorokoro44.opencodechat.data.model.ChatDto
 import com.sikorokoro44.opencodechat.data.model.ChatListResponse
+import com.sikorokoro44.opencodechat.data.model.ContentsResponse
 import com.sikorokoro44.opencodechat.data.model.CreateChatRequest
 import com.sikorokoro44.opencodechat.data.model.ErrorEnvelope
+import com.sikorokoro44.opencodechat.data.model.FileResponse
 import com.sikorokoro44.opencodechat.data.model.GithubStatusDto
 import com.sikorokoro44.opencodechat.data.model.MeResponse
+import com.sikorokoro44.opencodechat.data.model.MemoryResponse
+import com.sikorokoro44.opencodechat.data.model.MemorySessionsResponse
 import com.sikorokoro44.opencodechat.data.model.ModelsResponse
+import com.sikorokoro44.opencodechat.data.model.RecordSessionRequest
+import com.sikorokoro44.opencodechat.data.model.RecordSessionResponse
+import com.sikorokoro44.opencodechat.data.model.RepoListResponse
 import com.sikorokoro44.opencodechat.data.model.SendMessageResponse
+import com.sikorokoro44.opencodechat.data.model.UpdateChatRequest
+import com.sikorokoro44.opencodechat.data.model.UploadAttachmentRequest
+import com.sikorokoro44.opencodechat.data.model.WriteMemoryRequest
+import com.sikorokoro44.opencodechat.data.model.WriteMemoryResponse
 import io.ktor.client.HttpClient
 import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
+import io.ktor.client.request.parameter
+import io.ktor.client.request.patch
 import io.ktor.client.request.post
+import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
@@ -129,8 +149,165 @@ class OpenCodeApi(
             }
         }
 
+    suspend fun updateChat(
+        baseUrl: String,
+        token: String,
+        chatId: String,
+        request: UpdateChatRequest,
+    ): ApiResult<ChatDto> =
+        call(ChatDto.serializer()) {
+            client.patch("$baseUrl/v1/chats/$chatId") {
+                bearer(token)
+                contentType(ContentType.Application.Json)
+                setBody(request)
+            }
+        }
+
+    suspend fun uploadAttachment(
+        baseUrl: String,
+        token: String,
+        request: UploadAttachmentRequest,
+    ): ApiResult<AttachmentDto> =
+        call(AttachmentDto.serializer()) {
+            client.post("$baseUrl/v1/attachments") {
+                bearer(token)
+                contentType(ContentType.Application.Json)
+                setBody(request)
+            }
+        }
+
     suspend fun githubStatus(baseUrl: String, token: String): ApiResult<GithubStatusDto> =
         call(GithubStatusDto.serializer()) { client.get("$baseUrl/v1/github/status") { bearer(token) } }
+
+    suspend fun githubRepos(baseUrl: String, token: String, limit: Int = 100): ApiResult<RepoListResponse> =
+        call(RepoListResponse.serializer()) {
+            client.get("$baseUrl/v1/github/repos") {
+                bearer(token)
+                parameter("limit", limit)
+            }
+        }
+
+    suspend fun githubBranches(
+        baseUrl: String,
+        token: String,
+        owner: String,
+        repo: String,
+    ): ApiResult<BranchListResponse> =
+        call(BranchListResponse.serializer()) {
+            client.get("$baseUrl/v1/github/repos/$owner/$repo/branches") { bearer(token) }
+        }
+
+    suspend fun githubContents(
+        baseUrl: String,
+        token: String,
+        owner: String,
+        repo: String,
+        path: String,
+        ref: String?,
+    ): ApiResult<ContentsResponse> =
+        call(ContentsResponse.serializer()) {
+            client.get("$baseUrl/v1/github/repos/$owner/$repo/contents") {
+                bearer(token)
+                parameter("path", path)
+                if (!ref.isNullOrBlank()) parameter("ref", ref)
+            }
+        }
+
+    suspend fun githubFile(
+        baseUrl: String,
+        token: String,
+        owner: String,
+        repo: String,
+        path: String,
+        ref: String?,
+    ): ApiResult<FileResponse> =
+        call(FileResponse.serializer()) {
+            client.get("$baseUrl/v1/github/repos/$owner/$repo/file") {
+                bearer(token)
+                parameter("path", path)
+                if (!ref.isNullOrBlank()) parameter("ref", ref)
+            }
+        }
+
+    suspend fun readMemory(
+        baseUrl: String,
+        token: String,
+        owner: String,
+        repo: String,
+    ): ApiResult<MemoryResponse> =
+        call(MemoryResponse.serializer()) {
+            client.get("$baseUrl/v1/github/memory") {
+                bearer(token)
+                parameter("owner", owner)
+                parameter("repo", repo)
+            }
+        }
+
+    suspend fun writeMemory(
+        baseUrl: String,
+        token: String,
+        request: WriteMemoryRequest,
+    ): ApiResult<WriteMemoryResponse> =
+        call(WriteMemoryResponse.serializer()) {
+            client.put("$baseUrl/v1/github/memory") {
+                bearer(token)
+                contentType(ContentType.Application.Json)
+                setBody(request)
+            }
+        }
+
+    suspend fun listMemorySessions(
+        baseUrl: String,
+        token: String,
+        owner: String,
+        repo: String,
+    ): ApiResult<MemorySessionsResponse> =
+        call(MemorySessionsResponse.serializer()) {
+            client.get("$baseUrl/v1/github/memory/sessions") {
+                bearer(token)
+                parameter("owner", owner)
+                parameter("repo", repo)
+            }
+        }
+
+    suspend fun recordMemorySession(
+        baseUrl: String,
+        token: String,
+        request: RecordSessionRequest,
+    ): ApiResult<RecordSessionResponse> =
+        call(RecordSessionResponse.serializer()) {
+            client.post("$baseUrl/v1/github/memory/sessions") {
+                bearer(token)
+                contentType(ContentType.Application.Json)
+                setBody(request)
+            }
+        }
+
+    suspend fun runAgent(
+        baseUrl: String,
+        token: String,
+        request: AgentRunRequest,
+    ): ApiResult<AgentRunResponse> =
+        call(AgentRunResponse.serializer()) {
+            client.post("$baseUrl/v1/github/agent/run") {
+                bearer(token)
+                contentType(ContentType.Application.Json)
+                setBody(request)
+            }
+        }
+
+    suspend fun commitAgent(
+        baseUrl: String,
+        token: String,
+        request: AgentCommitRequest,
+    ): ApiResult<AgentCommitResponse> =
+        call(AgentCommitResponse.serializer()) {
+            client.post("$baseUrl/v1/github/agent/commit") {
+                bearer(token)
+                contentType(ContentType.Application.Json)
+                setBody(request)
+            }
+        }
 
     suspend fun connectGithub(baseUrl: String, token: String, githubToken: String): ApiResult<Unit> =
         callNoContent {

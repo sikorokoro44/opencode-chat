@@ -53,7 +53,18 @@ was used — read the `model` field of `meta`/`done` and the `fallback` events.
 Upload base64 with `POST /v1/attachments` (`data`, `mimeType`, optional
 `fileName`, `chatId`) and reference the returned `id` in `attachmentIds` when
 sending a message. Fetch bytes with `GET /v1/attachments/{id}`; responses are
-owner-scoped and `nosniff`.
+owner-scoped and `nosniff`. `ATTACHMENT_MAX_BYTES` (5 MiB by default, 25 MiB
+maximum) bounds the decoded payload, so clients should not buffer more than that
+before uploading.
+
+## Repository context
+
+`repository` is always exactly `owner/name`, and `projectPath` is a path relative
+to the repository root. Both are accepted on chat creation and `PATCH
+/v1/chats/{chatId}`, are validated and persisted, and are rejected with
+`400 invalid_path` when the path is absolute, traverses upwards, contains a
+backslash or a control character, or exceeds 1024 characters. Clients should
+apply the same rules locally so an invalid value never needs a round trip.
 
 ## GitHub coding agent
 
@@ -61,3 +72,28 @@ owner-scoped and `nosniff`.
 the agent commit/run endpoints. Privileged writes additionally require the
 operator-configured bootstrap token; user tokens are encrypted at rest and used
 only to call GitHub on that user's behalf.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/github/status` | Whether a token is connected, plus the login and scopes |
+| `POST`/`DELETE /v1/github/connect` | Store (validated) or forget the account's token |
+| `GET /v1/github/repos` | Repositories the account can reach |
+| `GET /v1/github/repos/{owner}/{repo}/branches` | Branch names and head shas |
+| `GET /v1/github/repos/{owner}/{repo}/contents` | Directory listing (`path`, `ref`) |
+| `GET /v1/github/repos/{owner}/{repo}/file` | Text file (`path`, `ref`; `ref` defaults to the default branch) |
+| `GET /v1/github/repos/{owner}/{repo}/search` | Code search scoped to one repository (`q`) |
+| `POST /v1/github/agent/commit` | Branch, commit files, optionally open a pull request |
+| `POST /v1/github/agent/run` | Agent tool loop over one repository |
+| `GET`/`PUT /v1/github/memory` | Read and write the project memory document |
+| `GET`/`POST /v1/github/memory/sessions` | List and record session memory documents |
+
+`POST /v1/github/agent/run` refuses with `github_not_connected` **before** any
+provider call when the account has no GitHub credential, so an unconnected
+account spends no quota; its optional `chatId` must be a chat the caller owns.
+
+`POST /v1/github/memory/sessions` is best-effort: it answers `201` with
+`{ stored, path, branch }`, where `stored` is `false` when the commit did not
+succeed. `chatId` becomes part of the document name, so it must be a single
+path-safe token owned by the caller. Reads and writes share the same path and the
+same metadata block, so a recorded session is immediately visible in
+`GET /v1/github/memory/sessions`.

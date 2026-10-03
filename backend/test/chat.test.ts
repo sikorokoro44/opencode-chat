@@ -82,6 +82,24 @@ test("another user's chat is reported as missing, never as forbidden", () => {
   assert.equal(chats.listChats("u2").length, 0);
 });
 
+test("the repository context the client sets on a chat is persisted", () => {
+  // The Android app sends repository/branch/projectPath through PATCH /v1/chats/{chatId};
+  // dropping them would silently lose the context the user picked.
+  const chats = service();
+  const chat = chats.createChat("u1");
+  const updated = chats.updateChat("u1", chat.id, {
+    repository: "octocat/hello-world",
+    branch: "main",
+    projectPath: "app/src",
+  });
+  assert.equal(updated.repository, "octocat/hello-world");
+  assert.equal(updated.branch, "main");
+  assert.equal(updated.projectPath, "app/src");
+  // Persisted, not just returned.
+  assert.equal(chats.requireChat("u1", chat.id).repository, "octocat/hello-world");
+  assert.equal(chats.requireChat("u1", chat.id).projectPath, "app/src");
+});
+
 test("updating a chat rejects an unknown model and accepts an allow-listed one", () => {
   const chats = service();
   const chat = chats.createChat("u1");

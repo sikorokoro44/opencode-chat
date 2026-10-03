@@ -5,6 +5,7 @@ import com.sikorokoro44.opencodechat.data.prefs.SettingsStore
 import com.sikorokoro44.opencodechat.data.remote.OpenCodeApi
 import com.sikorokoro44.opencodechat.data.repository.AuthRepository
 import com.sikorokoro44.opencodechat.data.repository.ChatRepository
+import com.sikorokoro44.opencodechat.data.repository.GithubRepository
 import io.ktor.client.HttpClient
 import kotlinx.serialization.json.Json
 
@@ -17,4 +18,5 @@ interface AppContainer {
     val api: OpenCodeApi
     val authRepository: AuthRepository
     val chatRepository: ChatRepository
+    val githubRepository: GithubRepository
 }

@@ -50,6 +50,61 @@ tokens and **no** signing secrets.
 - Request bodies are capped at `MAX_REQUEST_BODY_BYTES`; attachments and images
   have their own limits. Base64 input is validated before decoding.
 
+### Client identity (`TRUST_PROXY`)
+
+Rate-limit buckets are keyed on an address the caller cannot choose, so the
+identity rule is security-relevant rather than cosmetic:
+
+- **Default (`TRUST_PROXY=false`).** The bucket key is the socket address.
+  `X-Forwarded-For` is ignored entirely.
+- **`TRUST_PROXY=true`.** Only the **first** entry of `X-Forwarded-For` is used,
+  and only when it parses as a literal IP address (`node:net.isIP`); anything else
+  falls back to the socket address. Only the first hop is honoured so a
+  caller-supplied chain cannot prepend itself ahead of the proxy's own entry.
+- IPv4-mapped IPv6 (`::ffff:1.2.3.4`) is normalised to `1.2.3.4`, so one client
+  cannot hold two buckets by switching address family.
+
+Set `TRUST_PROXY=true` **only** when a proxy you control terminates every request
+and overwrites `X-Forwarded-For`. If clients can reach the backend directly, or
+the proxy appends to the header instead of replacing it, a caller can forge an
+address and mint unlimited buckets. Both maps are additionally capped
+(`RateLimiter.maxBuckets`, `AuthDelay.maxEntries`) and evicted, so a spoofed flood
+cannot grow process memory without bound even in a misconfigured deployment.
+
+## Repository authorisation
+
+- Every GitHub route resolves the **caller's own** credential. A caller-supplied
+  bootstrap token only selects the service account, and only on a timing-safe
+  match.
+- `repository` is parsed strictly as exactly `owner/name`; both halves must be
+  valid GitHub names. A value like `victim/repo/extra` is rejected rather than
+  silently addressing `victim/repo`.
+- `POST /v1/github/agent/run` resolves the credential **before** any provider call,
+  so an unconnected account can neither reach a repository nor burn quota on a run
+  that could not read anything. Its optional `chatId` must name a chat owned by the
+  caller, so agent prompts cannot be seeded with another account's history.
+- `chatId` values that become GitHub file names (`POST
+  /v1/github/memory/sessions`) must be a single path-safe token, and the chat must
+  be owned by the caller.
+- Repository-relative paths reject absolute paths, `..`, backslashes and control
+  characters; control characters are refused because the value also reaches commit
+  messages and log lines.
+- Repository context stored on a chat (`repository`, `projectPath`) is validated on
+  the way in, so a stored value can never become a traversal once something acts
+  on it.
+
+## Upstream response handling
+
+- GitHub responses are decoded defensively: a 2xx body missing an expected field is
+  reported as an unexpected response rather than dereferenced, so a malformed or
+  truncated upstream reply cannot become an unhandled crash.
+- An empty body is never cached against an ETag, so a later `304` cannot resolve to
+  no content. A `304` with nothing usable cached is retried once unconditionally
+  and then reported as an upstream failure; a raw `304` is never placed on the wire,
+  which is not a valid response status.
+- Upstream error messages are truncated and never include the raw body, a token, or
+  GitHub's documentation URL.
+
 ## GitHub tokens
 
 - User-supplied GitHub tokens are validated against the GitHub API, then encrypted
@@ -70,7 +125,9 @@ tokens and **no** signing secrets.
 ## Threat model scope
 
 In scope: credential stuffing, token replay, auth-token theft from disk, oversized
-payloads, SSRF via user-controlled URLs (provider/GitHub base URLs are
+payloads, rate-limit evasion via forged `X-Forwarded-For`, cross-account access to
+another account's chats or GitHub credential, path traversal in repository paths and
+stored file names, SSRF via user-controlled URLs (provider/GitHub base URLs are
 operator-controlled configuration only), and log leakage of secrets.
 
 Out of scope: an attacker with read access to the environment (they already have

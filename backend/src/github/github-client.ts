@@ -47,10 +47,12 @@ export class GitHubApiError extends HttpError {
 
   constructor(status: number, message: string, documentationUrl?: string, headers?: Record<string, string>) {
     const retryable = status === 403 || status === 429 || status >= 500;
-    super(status === 404 ? 404 : status === 422 ? 400 : status >= 500 ? 502 : status, `github_${status}`, message, {
-      retryable,
-      headers,
-    });
+    // Only a status a client can act on is forwarded; anything else (notably 304,
+    // which is not a valid error response) becomes a retryable 502 so it can never
+    // reach the wire as an unexpected status line.
+    const wire =
+      status === 404 ? 404 : status === 422 ? 400 : status === 403 || status === 429 ? status : status >= 500 ? 502 : 502;
+    super(wire, `github_${status}`, message, { retryable, headers });
     this.githubStatus = status;
     this.documentationUrl = documentationUrl;
   }
@@ -94,6 +96,11 @@ export class EtagCache {
     this.entries.clear();
   }
 
+  /** Drops one entry, used when a 304 turns out to have nothing to serve. */
+  delete(key: string): void {
+    this.entries.delete(key);
+  }
+
   get size(): number {
     return this.entries.size;
   }
@@ -132,8 +139,13 @@ export class GitHubClient {
     const method = options.method ?? "GET";
     const url = path.startsWith("http") ? path : `${this.baseUrl}${path}`;
     const cacheKey = `${method} ${url}`;
-    const cached = method === "GET" && !options.noCache ? this.cache.get(cacheKey) : undefined;
-    const useConditional = cached !== undefined && method === "GET" && !options.noCache;
+    const conditional = method === "GET" && !options.noCache;
+    const cached = conditional ? this.cache.get(cacheKey) : undefined;
+    // A conditional GET is only worth sending when a usable body was cached with the
+    // ETag; otherwise GitHub answers 304 and there is nothing to serve.
+    const useConditional = cached !== undefined;
+    // Bounded: a GitHub/proxy that keeps answering 304 must not spin forever.
+    let unconditionalRetries = 0;
 
     let attempt = 0;
     for (;;) {
@@ -169,8 +181,29 @@ export class GitHubClient {
         throw new GitHubApiError(504, timedOut ? "GitHub request timed out" : "GitHub is unreachable");
       }
 
-      if (response.status === 304 && cached) {
-        return { data: JSON.parse(cached.body) as T, status: 304, etag: cached.etag, notModified: true };
+      if (response.status === 304) {
+        if (useConditional && cached) {
+          // The cached body may be raw file text (the contents API is asked for
+          // `vnd.github.raw` on file reads), so it must go through the same
+          // tolerant parse as a live 200 rather than a bare `JSON.parse`.
+          const data = parseBody(cached.body);
+          if (data !== undefined) return { data: data as T, status: 304, etag: cached.etag, notModified: true };
+        }
+        // 304 with nothing to serve: ask for the resource unconditionally rather than
+        // handing callers an empty body (or a 304, which is not a valid error).
+        if (conditional && unconditionalRetries === 0) {
+          unconditionalRetries += 1;
+          this.cache.delete(cacheKey);
+          try {
+            return await this.request<T>(path, { ...options, noCache: true });
+          } catch (error) {
+            // A second unconditional attempt answers 304 again: surface it as an
+            // upstream failure rather than looping.
+            if (error instanceof GitHubApiError && error.githubStatus === 304) break;
+            throw error;
+          }
+        }
+        break;
       }
 
       if (response.status === 403 || response.status === 429) {
@@ -197,22 +230,17 @@ export class GitHubClient {
       const text = await response.text();
       // The contents API returns raw file text for `vnd.github.raw`; only attempt
       // JSON parsing and otherwise hand the body back verbatim.
-      let data: unknown;
-      if (text === "") {
-        data = undefined;
-      } else {
-        try {
-          data = JSON.parse(text);
-        } catch {
-          data = text;
-        }
-      }
+      const data = parseBody(text);
       const etag = response.headers.get("etag") ?? undefined;
-      if (etag && method === "GET" && typeof text === "string") {
+      // An empty body is never cached: a later 304 would then resolve to no content at
+      // all and every caller of the cached body would have to defend against it.
+      if (etag !== undefined && conditional && text !== "") {
         this.cache.set(cacheKey, etag, text);
       }
       return { data: data as T, status: response.status, etag, notModified: false };
     }
+
+    throw new GitHubApiError(304, "GitHub answered 304 Not Modified without a cached response");
   }
 
   private backoffMs(attempt: number): number {
@@ -227,21 +255,33 @@ export class GitHubClient {
   }
 
   async currentLogin(): Promise<string> {
-    const { data } = await this.request<{ login: string }>("/user", { noCache: true });
-    return data.login;
+    const { data } = await this.request<{ login?: string }>("/user", { noCache: true });
+    const login = asObject(data).login;
+    if (typeof login !== "string" || login === "") {
+      throw new GitHubApiError(502, "GitHub returned an unexpected response for /user");
+    }
+    return login;
   }
 
   async listRepos(limit = 100): Promise<Repo[]> {
     const capped = Math.min(Math.max(limit, 1), 200);
     const { data } = await this.request<GitHubRepo[]>(`/user/repos?per_page=${capped}&sort=updated&affiliation=owner,collaborator,organization_member`);
-    return data.map(toRepo);
+    return asArray(data).map((repo) => toRepo(repo as GitHubRepo));
   }
 
   async listBranches(owner: string, repo: string): Promise<{ name: string; sha: string }[]> {
-    const { data } = await this.request<{ name: string; commit: { sha: string } }[]>(
+    const { data } = await this.request<{ name?: string; commit?: { sha?: string } }[]>(
       `/repos/${owner}/${repo}/branches?per_page=100`,
     );
-    return data.map((branch) => ({ name: branch.name, sha: branch.commit.sha }));
+    return asArray(data).map((branch) => {
+      const record = asObject(branch);
+      const name = record.name;
+      const sha = asObject(record.commit).sha;
+      if (typeof name !== "string" || typeof sha !== "string") {
+        throw new GitHubApiError(502, "GitHub returned an unexpected branch listing");
+      }
+      return { name, sha };
+    });
   }
 
   async listContents(owner: string, repo: string, path: string, ref?: string): Promise<{ path: string; ref: string; entries: RepoEntry[] }> {
@@ -279,13 +319,15 @@ export class GitHubClient {
         content: truncated ? Buffer.from(data, "utf8").subarray(0, maxBytes).toString("utf8") : data,
       };
     }
-    const base64 = (data.content ?? "").replace(/\n/g, "");
+    const rawContent = asObject(data).content;
+    const base64 = (typeof rawContent === "string" ? rawContent : "").replace(/\n/g, "");
     const buffer = Buffer.from(base64, "base64");
     const truncated = buffer.length > maxBytes;
+    const record = asObject(data);
     return {
-      path: data.path,
+      path: typeof record.path === "string" ? record.path : path,
       ref,
-      sha: data.sha,
+      sha: typeof record.sha === "string" ? record.sha : "",
       size: buffer.length,
       truncated,
       content: buffer.subarray(0, maxBytes).toString("utf8"),
@@ -294,23 +336,28 @@ export class GitHubClient {
 
   /** Creates a branch at `baseRef`'s head sha. Returns the new branch name. */
   async createBranch(owner: string, repo: string, branch: string, baseRef: string): Promise<string> {
-    const { data } = await this.request<{ object: { sha: string } }>(
+    const { data } = await this.request<{ object?: { sha?: string } }>(
       `/repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(baseRef)}`,
       { noCache: true },
     );
+    const sha = asObject(asObject(data).object).sha;
+    if (typeof sha !== "string" || sha === "") {
+      throw new GitHubApiError(502, `GitHub returned no head sha for ${baseRef}`);
+    }
     await this.request(`/repos/${owner}/${repo}/git/refs`, {
       method: "POST",
-      body: { ref: `refs/heads/${branch}`, sha: data.object.sha },
+      body: { ref: `refs/heads/${branch}`, sha },
     });
     return branch;
   }
 
   async getRef(owner: string, repo: string, branch: string): Promise<string | undefined> {
-    const result = await this.request<{ object: { sha: string } }>(
+    const result = await this.request<{ object?: { sha?: string } }>(
       `/repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(branch)}`,
       { noCache: true },
     );
-    return result.data.object.sha;
+    const sha = asObject(asObject(result.data).object).sha;
+    return typeof sha === "string" ? sha : undefined;
   }
 
   /** Writes files to a branch through the contents API, one request per file. */
@@ -333,7 +380,10 @@ export class GitHubClient {
           `/repos/${owner}/${repo}/contents/${encoded}?ref=${encodeURIComponent(branch)}`,
           { noCache: true },
         );
-        if (typeof existing.data !== "string") sha = existing.data.sha;
+        if (typeof existing.data !== "string") {
+          const existingSha = asObject(existing.data).sha;
+          if (typeof existingSha === "string") sha = existingSha;
+        }
       } catch (error) {
         if (error instanceof GitHubApiError && error.githubStatus !== 404) throw error;
       }
@@ -351,9 +401,15 @@ export class GitHubClient {
           },
         },
       );
-      commitSha = data.commit.sha;
+      const written = asObject(asObject(data).commit).sha;
+      // A 2xx without a commit sha is not a successful write: report it as failed
+      // instead of dereferencing it and crashing with a TypeError.
+      if (typeof written !== "string" || written === "") {
+        skipped.push(file.path);
+        continue;
+      }
+      commitSha = written;
       committed.push(file.path);
-      void skipped;
     }
 
     return { commitSha, committed, skipped };
@@ -364,31 +420,57 @@ export class GitHubClient {
     repo: string,
     input: { title: string; head: string; base: string; body: string },
   ): Promise<{ number: number; url: string }> {
-    const { data } = await this.request<{ number: number; html_url: string }>(
+    const { data } = await this.request<{ number?: number; html_url?: string }>(
       `/repos/${owner}/${repo}/pulls`,
       { method: "POST", body: input },
     );
-    return { number: data.number, url: data.html_url };
+    const record = asObject(data);
+    if (typeof record.number !== "number" || typeof record.html_url !== "string") {
+      throw new GitHubApiError(502, "GitHub returned an unexpected pull request response");
+    }
+    return { number: record.number, url: record.html_url };
   }
 
   async defaultBranch(owner: string, repo: string): Promise<string> {
-    const { data } = await this.request<{ default_branch: string }>(`/repos/${owner}/${repo}`, { noCache: true });
-    return data.default_branch;
+    const { data } = await this.request<{ default_branch?: string }>(`/repos/${owner}/${repo}`, { noCache: true });
+    const branch = asObject(data).default_branch;
+    if (typeof branch !== "string" || branch === "") {
+      throw new GitHubApiError(502, "GitHub returned no default branch for this repository");
+    }
+    return branch;
   }
 
   async searchCode(owner: string, repo: string, query: string, limit = 20): Promise<RepoEntry[]> {
     const q = `repo:${owner}/${repo} ${query}`;
-    const { data } = await this.request<{ items?: { path: string; sha: string }[] }>(
+    const { data } = await this.request<{ items?: { path?: string; sha?: string }[] }>(
       `/search/code?q=${encodeURIComponent(q)}&per_page=${Math.min(limit, 50)}`,
     );
-    return (data.items ?? []).map((item) => ({
-      path: item.path,
-      name: item.path.split("/").pop() ?? item.path,
-      type: "file" as const,
-      size: 0,
-      sha: item.sha,
-    }));
+    const items = asObject(data).items;
+    const entries: RepoEntry[] = [];
+    for (const raw of Array.isArray(items) ? items : []) {
+      const item = asObject(raw);
+      if (typeof item.path !== "string") continue;
+      entries.push({
+        path: item.path,
+        name: item.path.split("/").pop() ?? item.path,
+        type: "file",
+        size: 0,
+        sha: typeof item.sha === "string" ? item.sha : "",
+      });
+    }
+    return entries;
   }
+}
+
+/** Narrows an unknown decoded body to a record without ever throwing. */
+function asObject(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
 }
 
 interface GitHubRepo {
@@ -416,26 +498,32 @@ interface GitHubCommitResult {
 }
 
 export function toRepo(repo: GitHubRepo): Repo {
-  const slash = repo.full_name.indexOf("/");
+  const record = asObject(repo);
+  const fullName = typeof record.full_name === "string" ? record.full_name : "";
+  const name = typeof record.name === "string" ? record.name : fullName.split("/")[1] ?? fullName;
+  const slash = fullName.indexOf("/");
+  const ownerLogin = asObject(record.owner).login;
   return {
-    fullName: repo.full_name,
-    name: repo.name,
-    owner: slash === -1 ? repo.owner.login : repo.full_name.slice(0, slash),
-    private: Boolean(repo.private),
-    defaultBranch: repo.default_branch ?? null,
-    description: repo.description ?? null,
-    updatedAt: repo.updated_at ?? null,
-    language: repo.language ?? null,
+    fullName,
+    name,
+    owner: slash === -1 ? (typeof ownerLogin === "string" ? ownerLogin : "") : fullName.slice(0, slash),
+    private: Boolean(record.private),
+    defaultBranch: (record.default_branch as string | undefined) ?? null,
+    description: (record.description as string | null | undefined) ?? null,
+    updatedAt: (record.updated_at as string | undefined) ?? null,
+    language: (record.language as string | null | undefined) ?? null,
   };
 }
 
 export function toEntry(entry: GitHubContent): RepoEntry {
+  const record = asObject(entry);
+  const path = typeof record.path === "string" ? record.path : "";
   return {
-    path: entry.path,
-    name: entry.name,
-    type: entry.type === "dir" ? "dir" : "file",
-    size: entry.size,
-    sha: entry.sha,
+    path,
+    name: typeof record.name === "string" ? record.name : (path.split("/").pop() ?? path),
+    type: record.type === "dir" ? "dir" : "file",
+    size: typeof record.size === "number" ? record.size : 0,
+    sha: typeof record.sha === "string" ? record.sha : "",
   };
 }
 
@@ -462,5 +550,18 @@ function safeJson(text: string): unknown {
     return JSON.parse(text);
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Decodes a GitHub response body. The contents API answers with raw file text when
+ * `vnd.github.raw` is requested, so a body that is not JSON is returned verbatim.
+ */
+function parseBody(text: string): unknown {
+  if (text === "") return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
   }
 }

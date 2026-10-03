@@ -1,5 +1,7 @@
 package com.sikorokoro44.opencodechat
 
+import com.sikorokoro44.opencodechat.data.model.UpdateChatRequest
+import com.sikorokoro44.opencodechat.data.model.UploadAttachmentRequest
 import com.sikorokoro44.opencodechat.data.remote.ApiResult
 import com.sikorokoro44.opencodechat.data.remote.OpenCodeApi
 import io.ktor.client.HttpClient
@@ -67,5 +69,69 @@ class OpenCodeApiTest {
         val result = api(engine).models("https://example.test", "token")
         assertTrue(result is ApiResult.Failure)
         assertEquals("network_error", (result as ApiResult.Failure).code)
+    }
+
+    @Test
+    fun `updateChat uses PATCH and decodes the chat`() = runTest {
+        var path = ""
+        var method = ""
+        val engine = MockEngine { request ->
+            path = request.url.encodedPath
+            method = request.method.value
+            respond(
+                content = """{"id":"c1","title":"Renamed","messageCount":2}""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val result = api(engine).updateChat(
+            "https://example.test",
+            "token",
+            "c1",
+            UpdateChatRequest(repository = "octocat/hello-world", branch = "main"),
+        )
+        assertTrue(result is ApiResult.Success)
+        assertEquals("/v1/chats/c1", path)
+        assertEquals("PATCH", method)
+        assertEquals("Renamed", (result as ApiResult.Success).value.title)
+    }
+
+    @Test
+    fun `uploadAttachment posts and decodes the attachment`() = runTest {
+        var path = ""
+        var method = ""
+        val engine = MockEngine { request ->
+            path = request.url.encodedPath
+            method = request.method.value
+            respond(
+                content = """{"id":"a1","mimeType":"image/png","sizeBytes":12,"kind":"image","fileName":"x.png"}""",
+                status = HttpStatusCode.Created,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val result = api(engine).uploadAttachment(
+            "https://example.test",
+            "token",
+            UploadAttachmentRequest(data = "AAAA", mimeType = "image/png", fileName = "x.png"),
+        )
+        assertTrue(result is ApiResult.Success)
+        assertEquals("/v1/attachments", path)
+        assertEquals("POST", method)
+        assertEquals("a1", (result as ApiResult.Success).value.id)
+    }
+
+    @Test
+    fun `githubRepos decodes the repository list`() = runTest {
+        val engine = MockEngine { request ->
+            assertEquals("/v1/github/repos", request.url.encodedPath)
+            respond(
+                content = """{"repos":[{"fullName":"octocat/hello-world","name":"hello-world","owner":"octocat","defaultBranch":"main"}]}""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val result = api(engine).githubRepos("https://example.test", "token")
+        assertTrue(result is ApiResult.Success)
+        assertEquals("octocat/hello-world", (result as ApiResult.Success).value.repos.first().fullName)
     }
 }

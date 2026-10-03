@@ -35,6 +35,22 @@ Android app (Kotlin/Compose)          Backend (Node 20, TypeScript, zero deps)
 - **GitHub** access is via `src/github/github-client.ts` (REST, ETag caching) and
   `src/github/github-service.ts` (per-user encrypted tokens). The coding agent
   (`src/github/coding-agent.ts`) runs a tool loop over the model provider.
+- **GitHub responses are decoded defensively.** `github-client.ts` narrows every
+  decoded body through small accessors, so a truncated or unexpected upstream reply
+  becomes a typed error instead of an unhandled `TypeError`. Empty bodies are never
+  cached against an ETag, and a `304` with nothing usable cached is retried once
+  unconditionally and then reported as an upstream failure.
+- **Session memory** (`github-service.ts`) keeps one canonical path helper shared by
+  reads and writes: a session is `<directory of the memory file>/session-<chatId>.md`.
+  Rendering and parsing live next to each other, so the listing cannot disagree
+  with what was written. `chatId` is validated as a single path-safe token before it
+  reaches that path.
+- **Identity for abuse controls** comes from `clientIdentity` in
+  `src/http/respond.ts`, which keys on the socket address unless `TRUST_PROXY` is
+  set. See [`docs/security.md`](security.md).
+- `shared/openapi.json` is enforced against the served routes by
+  `backend/test/openapi-parity.test.ts`, so a route cannot be added or documented
+  without the other.
 
 ## Android
 

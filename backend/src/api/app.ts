@@ -13,7 +13,7 @@ import { createLogger, type Logger } from "../logger.ts";
 import { newId } from "../ids.ts";
 import { parseJson, readBody } from "../http/body.ts";
 import { HttpError, notFound, tooManyRequests, unauthorized } from "../http/errors.ts";
-import { clientAddress, toHttpError, writeError, writeJson } from "../http/respond.ts";
+import { clientIdentity, toHttpError, writeError, writeJson } from "../http/respond.ts";
 import { Router, type Principal, type RequestContext } from "../http/router.ts";
 import { AuthDelay, RateLimiter } from "../http/rate-limit.ts";
 import { AuthService } from "../auth/auth-service.ts";
@@ -194,7 +194,11 @@ async function handleRequest(
   const { route, params } = match;
   const isHealthCheck = route.segments.length === 1 && route.segments[0] === "health";
   if (!isHealthCheck && !route.public) {
-    const bucket = rateLimiter.take(`${clientAddress(req)}:${route.method}:${route.segments.length}`);
+    // Same server-side identity the auth limiter uses, so a forged
+    // `X-Forwarded-For` cannot buy extra buckets here either.
+    const bucket = rateLimiter.take(
+      `${clientIdentity(req, dependencies.config.trustProxy)}:${route.method}:${route.segments.length}`,
+    );
     if (!bucket.allowed) {
       const error = tooManyRequests(bucket.retryAfterMs / 1000);
       writeError(res, error, logger, requestId);

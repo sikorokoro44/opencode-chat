@@ -2,6 +2,7 @@
 
 import type { ServerResponse } from "node:http";
 import type { IncomingMessage } from "node:http";
+import { isIP } from "node:net";
 import type { Socket } from "node:net";
 import { HttpError } from "./errors.ts";
 import { AllModelsFailedError, ProviderError } from "../models/errors.ts";
@@ -59,10 +60,29 @@ export function clientAddress(req: IncomingMessage): string {
   return address.startsWith("::ffff:") ? address.slice(7) : address;
 }
 
-/** Best-effort client identity for auth throttling, honouring one proxy hop. */
-export function clientIdentity(req: IncomingMessage): string {
-  const forwarded = req.headers["x-forwarded-for"];
-  const raw = Array.isArray(forwarded) ? forwarded[0] : forwarded;
-  if (typeof raw === "string" && raw !== "") return raw.split(",")[0]?.trim() ?? raw;
-  return clientAddress(req);
+/**
+ * Server-side identity for rate-limit bucketing.
+ *
+ * `X-Forwarded-For` is attacker-controlled unless the deployment terminates every
+ * request at a proxy that overwrites it, so it is only read when `trustProxy` is
+ * set explicitly. The header value is additionally required to be a literal IP
+ * address: otherwise a caller could mint unbounded buckets (and unbounded limiter
+ * memory) by sending random strings.
+ */
+export function clientIdentity(req: IncomingMessage, trustProxy = false): string {
+  const socketAddress = clientAddress(req);
+  if (!trustProxy) return socketAddress;
+
+  const header = req.headers["x-forwarded-for"];
+  const raw = Array.isArray(header) ? header[0] : header;
+  if (typeof raw !== "string" || raw === "") return socketAddress;
+  // A proxy that overwrites the header leaves exactly one hop; the first entry is
+  // the address it observed.
+  const candidate = raw.split(",")[0]?.trim() ?? "";
+  return isIP(candidate) !== 0 ? normaliseIp(candidate) : socketAddress;
+}
+
+/** IPv4-mapped IPv6 (`::ffff:1.2.3.4`) and IPv6 peers must not fork into two buckets. */
+function normaliseIp(address: string): string {
+  return address.startsWith("::ffff:") ? address.slice(7) : address;
 }
