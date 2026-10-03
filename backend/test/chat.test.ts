@@ -200,9 +200,9 @@ test("an image attachment is inlined as image_url for vision models and noted ot
 
 test("inlineAttachments converts placeholders to data URLs and blocks other users", async () => {
   const directory = await tempDir();
+  const { openDatabase } = await import("../src/store/database.ts");
+  const database = await openDatabase({ directory, flushDelayMs: 0 });
   try {
-    const { openDatabase } = await import("../src/store/database.ts");
-    const database = await openDatabase({ directory, flushDelayMs: 0 });
     const record = await storeAttachment(
       { userId: "u1", mimeType: "image/png", data: png(), directory },
       { maxBytes: 1_000_000, maxImageBytes: 1_000_000, ttlMs: 60_000 },
@@ -226,6 +226,9 @@ test("inlineAttachments converts placeholders to data URLs and blocks other user
     assert.equal(blocked?.type, "text");
     assert.equal(blocked?.text, "[image unavailable]");
   } finally {
+    // The store flushes on a timer. Close it before removing the directory so
+    // an in-flight atomic write cannot recreate files while rmdir runs.
+    await database.close();
     await rm(directory, { recursive: true, force: true });
   }
 });
