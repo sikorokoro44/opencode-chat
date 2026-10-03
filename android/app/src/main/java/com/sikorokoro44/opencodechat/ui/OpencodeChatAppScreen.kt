@@ -40,6 +40,7 @@ fun OpencodeChatAppScreen() {
             state.tokens == null -> LoginScreen(
                 state = state,
                 onBaseUrlChange = viewModel::setBaseUrl,
+                onAllowInsecureHttpChange = viewModel::setAllowInsecureHttp,
                 onLogin = viewModel::login,
                 onRegister = viewModel::register,
             )

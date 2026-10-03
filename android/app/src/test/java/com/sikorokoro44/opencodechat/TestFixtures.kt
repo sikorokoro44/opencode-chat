@@ -47,12 +47,16 @@ fun testJson(): Json = Json {
     encodeDefaults = true
 }
 
-fun testContainer(engine: MockEngine, tokens: AuthTokens? = null): AppContainer {
+fun testContainer(
+    engine: MockEngine,
+    tokens: AuthTokens? = null,
+    baseUrl: String = "https://example.test",
+): AppContainer {
     val json = testJson()
     val client = HttpClient(engine) { expectSuccess = false }
     val api = OpenCodeApi(client, json)
     val tokenStore = InMemoryTokenStore(tokens)
-    val settingsStore = InMemorySettingsStore("https://example.test")
+    val settingsStore = InMemorySettingsStore(baseUrl)
     val authRepository = AuthRepository(api, tokenStore, settingsStore, "test-device")
     val streamClient = ChatStreamClient(client, json)
     val chatRepository = ChatRepository(api, streamClient, authRepository)

@@ -91,21 +91,34 @@ class ChatRepository(
         modelId: String?,
         attachmentIds: List<String> = emptyList(),
     ): Flow<ChatStreamEvent> = flow {
+        val base = auth.baseUrl()
+        auth.insecureTransport(base)?.let { blocked ->
+            emit(blocked.toStreamEvent())
+            return@flow
+        }
         val tokens = auth.currentTokens()
         if (tokens == null) {
             emit(ChatStreamEvent(type = "error", code = "unauthorized", message = "not signed in"))
             return@flow
         }
-        emitAll(streamClient.stream(auth.baseUrl(), tokens.accessToken, chatId, content, modelId, attachmentIds))
+        emitAll(streamClient.stream(base, tokens.accessToken, chatId, content, modelId, attachmentIds))
     }
 
     /** Re-runs the last user turn, replacing the previous answer. */
     fun regenerate(chatId: String, modelId: String?): Flow<ChatStreamEvent> = flow {
+        val base = auth.baseUrl()
+        auth.insecureTransport(base)?.let { blocked ->
+            emit(blocked.toStreamEvent())
+            return@flow
+        }
         val tokens = auth.currentTokens()
         if (tokens == null) {
             emit(ChatStreamEvent(type = "error", code = "unauthorized", message = "not signed in"))
             return@flow
         }
-        emitAll(streamClient.regenerate(auth.baseUrl(), tokens.accessToken, chatId, modelId))
+        emitAll(streamClient.regenerate(base, tokens.accessToken, chatId, modelId))
     }
+
+    private fun ApiResult.Failure.toStreamEvent(): ChatStreamEvent =
+        ChatStreamEvent(type = "error", code = code, message = message)
 }

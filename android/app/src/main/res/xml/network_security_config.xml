@@ -1,16 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    HTTPS is the default for every host: the base config refuses cleartext so a
+    remote backend can never receive a token in plaintext, even if some other
+    component tries to send one.
+
+    Plain HTTP is permitted only for the loopback interface, where the request
+    never leaves the device. This keeps `adb reverse` / on-device development
+    working while LAN or internet HTTP backends require TLS.
+
+    The emulator alias 10.0.2.2 is deliberately absent here; it is added by the
+    debug-only override in src/debug/res/xml/network_security_config.xml.
+-->
 <network-security-config>
-    <!--
-        The backend URL is entered by the user and normally points at a
-        self-hosted server on a private network, for example
-        http://192.168.1.10:8080. Android blocks cleartext HTTP by default,
-        which made every such backend unreachable (the app only worked against
-        loopback/emulator hosts), so plain HTTP is permitted here. HTTPS is
-        still validated against the system trust anchors.
-    -->
-    <base-config cleartextTrafficPermitted="true">
+    <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
     </base-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
 </network-security-config>

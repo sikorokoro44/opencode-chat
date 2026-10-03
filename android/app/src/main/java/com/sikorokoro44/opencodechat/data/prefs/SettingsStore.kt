@@ -1,9 +1,11 @@
 package com.sikorokoro44.opencodechat.data.prefs
 
 import android.content.Context
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.sikorokoro44.opencodechat.data.remote.BackendUrlPolicy
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
@@ -15,6 +17,16 @@ interface SettingsStore {
     suspend fun baseUrl(): String
     suspend fun setBaseUrl(value: String)
 
+    /**
+     * Explicit consent to send credentials to an `http://` backend that is not
+     * on loopback. Defaults to false and is never inferred from the URL, so an
+     * existing cleartext setting from an older release cannot silently keep
+     * receiving tokens after an upgrade.
+     */
+    val allowInsecureHttpFlow: Flow<Boolean>
+    suspend fun allowInsecureHttp(): Boolean
+    suspend fun setAllowInsecureHttp(value: Boolean)
+
     companion object {
         const val DEFAULT_BASE_URL = "https://opencode-chat.example.com"
     }
@@ -25,16 +37,41 @@ private val Context.settingsDataStore by preferencesDataStore(name = "settings")
 /** Preferences-DataStore implementation used by the app. */
 class DataStoreSettingsStore(private val context: Context) : SettingsStore {
     private val baseUrlKey = stringPreferencesKey("base_url")
+    private val allowInsecureHttpKey = booleanPreferencesKey("allow_insecure_http")
 
     override val baseUrlFlow: Flow<String> = context.settingsDataStore.data.map { preferences ->
-        preferences[baseUrlKey]?.takeIf { it.isNotBlank() } ?: SettingsStore.DEFAULT_BASE_URL
+        preferences[baseUrlKey]
+            ?.takeIf { it.isNotBlank() }
+            ?.let { normalize(it) }
+            ?: SettingsStore.DEFAULT_BASE_URL
+    }
+
+    override val allowInsecureHttpFlow: Flow<Boolean> = context.settingsDataStore.data.map { preferences ->
+        preferences[allowInsecureHttpKey] ?: false
     }
 
     override suspend fun baseUrl(): String = baseUrlFlow.first()
 
     override suspend fun setBaseUrl(value: String) {
+        val normalized = normalize(value)
         context.settingsDataStore.edit { preferences ->
-            preferences[baseUrlKey] = normalize(value)
+            preferences[baseUrlKey] = normalized
+            // An opt-in only applies to a cleartext remote URL. Retract it as soon as
+            // the backend is HTTPS or loopback so it cannot outlive its purpose.
+            if (!BackendUrlPolicy.isCleartextRemote(normalized)) {
+                preferences[allowInsecureHttpKey] = false
+            }
+        }
+    }
+
+    override suspend fun allowInsecureHttp(): Boolean = allowInsecureHttpFlow.first()
+
+    override suspend fun setAllowInsecureHttp(value: Boolean) {
+        // Read the base URL before opening the edit transaction: reading the same
+        // DataStore from inside it would contend on its own write lock.
+        val effective = value && BackendUrlPolicy.isCleartextRemote(baseUrlFlow.first())
+        context.settingsDataStore.edit { preferences ->
+            preferences[allowInsecureHttpKey] = effective
         }
     }
 }
@@ -42,14 +79,29 @@ class DataStoreSettingsStore(private val context: Context) : SettingsStore {
 /** In-memory implementation so ViewModels and repositories can be tested on the JVM. */
 class InMemorySettingsStore(initial: String = SettingsStore.DEFAULT_BASE_URL) : SettingsStore {
     private val state = MutableStateFlow(normalize(initial))
+    private val allowInsecure = MutableStateFlow(false)
 
     override val baseUrlFlow: Flow<String> = state
+
+    override val allowInsecureHttpFlow: Flow<Boolean> = allowInsecure
 
     override suspend fun baseUrl(): String = state.value
 
     override suspend fun setBaseUrl(value: String) {
-        state.value = normalize(value)
+        val normalized = normalize(value)
+        state.value = normalized
+        if (!BackendUrlPolicy.isCleartextRemote(normalized)) allowInsecure.value = false
+    }
+
+    override suspend fun allowInsecureHttp(): Boolean = allowInsecure.value
+
+    override suspend fun setAllowInsecureHttp(value: Boolean) {
+        allowInsecure.value = value && BackendUrlPolicy.isCleartextRemote(state.value)
     }
 }
 
-private fun normalize(value: String): String = value.trim().trimEnd('/')
+/** A missing scheme becomes https:// so the secure default is always explicit. */
+private fun normalize(value: String): String {
+    val normalized = BackendUrlPolicy.normalize(value)
+    return normalized.ifEmpty { SettingsStore.DEFAULT_BASE_URL }
+}

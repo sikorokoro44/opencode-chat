@@ -33,6 +33,7 @@ data class UiState(
     val booting: Boolean = true,
     val tokens: AuthTokens? = null,
     val baseUrl: String = "",
+    val allowInsecureHttp: Boolean = false,
     val chats: List<ChatDto> = emptyList(),
     val activeChatId: String? = null,
     val messages: List<MessageDto> = emptyList(),
@@ -88,14 +89,35 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch {
             val baseUrl = auth.baseUrl()
             val tokens = auth.currentTokens()
-            _state.update { it.copy(booting = false, baseUrl = baseUrl, tokens = tokens) }
+            _state.update {
+                it.copy(
+                    booting = false,
+                    baseUrl = baseUrl,
+                    tokens = tokens,
+                    allowInsecureHttp = auth.allowInsecureHttp(),
+                )
+            }
             if (tokens != null) refreshOverview()
         }
     }
 
     fun setBaseUrl(value: String) {
         _state.update { it.copy(baseUrl = value) }
-        viewModelScope.launch { container.settingsStore.setBaseUrl(value) }
+        viewModelScope.launch {
+            container.settingsStore.setBaseUrl(value)
+            // Persisting the URL may retract a stale cleartext opt-in; mirror that
+            // in the UI so the checkbox never claims consent the store has dropped.
+            _state.update { it.copy(allowInsecureHttp = container.settingsStore.allowInsecureHttp()) }
+        }
+    }
+
+    /** Records the user's explicit consent to send credentials over plain HTTP. */
+    fun setAllowInsecureHttp(value: Boolean) {
+        _state.update { it.copy(allowInsecureHttp = value) }
+        viewModelScope.launch {
+            container.settingsStore.setAllowInsecureHttp(value)
+            _state.update { it.copy(allowInsecureHttp = container.settingsStore.allowInsecureHttp()) }
+        }
     }
 
     fun login(username: String, password: String) {
@@ -110,7 +132,11 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch {
             stopInternal()
             auth.logout()
-            _state.value = UiState(booting = false, baseUrl = auth.baseUrl())
+            _state.value = UiState(
+                booting = false,
+                baseUrl = auth.baseUrl(),
+                allowInsecureHttp = auth.allowInsecureHttp(),
+            )
         }
     }
 

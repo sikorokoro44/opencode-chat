@@ -2,6 +2,7 @@ package com.sikorokoro44.opencodechat.ui.auth
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -11,6 +12,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -26,18 +28,29 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.sikorokoro44.opencodechat.data.remote.BackendUrlPolicy
+import com.sikorokoro44.opencodechat.data.remote.TransportVerdict
 import com.sikorokoro44.opencodechat.ui.UiState
 
 @Composable
 fun LoginScreen(
     state: UiState,
     onBaseUrlChange: (String) -> Unit,
+    onAllowInsecureHttpChange: (Boolean) -> Unit,
     onLogin: (String, String) -> Unit,
     onRegister: (String, String) -> Unit,
 ) {
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var registering by remember { mutableStateOf(false) }
+
+    val verdict = remember(state.baseUrl, state.allowInsecureHttp) {
+        BackendUrlPolicy.verdict(state.baseUrl, state.allowInsecureHttp)
+    }
+    val cleartextRemote = remember(state.baseUrl) {
+        BackendUrlPolicy.isCleartextRemote(state.baseUrl)
+    }
+    val transportWarning = BackendUrlPolicy.explain(state.baseUrl, state.allowInsecureHttp)
 
     Column(
         modifier = Modifier
@@ -65,8 +78,44 @@ fun LoginScreen(
             label = { Text("Server URL") },
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+            supportingText = {
+                Text(
+                    when (verdict) {
+                        TransportVerdict.SECURE -> "Secured with https://"
+                        TransportVerdict.LOOPBACK -> "http:// on this device only"
+                        TransportVerdict.INSECURE_ALLOWED, TransportVerdict.INSECURE_BLOCKED ->
+                            "Unencrypted http:// — not safe for real credentials"
+                    },
+                )
+            },
+            isError = verdict == TransportVerdict.INSECURE_BLOCKED,
             modifier = Modifier.fillMaxWidth(),
         )
+
+        if (cleartextRemote) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Checkbox(
+                    checked = state.allowInsecureHttp,
+                    onCheckedChange = onAllowInsecureHttpChange,
+                )
+                Text(
+                    text = "Allow unencrypted HTTP for this server",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            if (transportWarning != null) {
+                Text(
+                    text = transportWarning,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(bottom = 4.dp),
+                )
+            }
+        }
+
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(
             value = username,

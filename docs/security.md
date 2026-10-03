@@ -41,6 +41,31 @@ tokens and **no** signing secrets.
 - `Authorization` is never echoed back, and request logs record only method, path,
   status and duration.
 
+### Client transport
+
+The Android client treats the configured server URL as untrusted input and
+refuses to put a credential on an unencrypted socket:
+
+- `network_security_config.xml` sets `cleartextTrafficPermitted="false"` for every
+  host, so the platform refuses plain HTTP even if a request were built with a
+  token attached. Cleartext is permitted only for `localhost` and `127.0.0.1`,
+  where traffic never leaves the device; debug builds additionally allow
+  `10.0.2.2`, the emulator's alias for the host machine.
+- `BackendUrlPolicy` is the application-layer guard that runs first. A URL typed
+  without a scheme becomes `https://`.
+- Every path that carries a password, access token or refresh token checks the
+  policy before building a request and fails closed with `insecure_transport` if
+  the transport is not allowed.
+- Plain HTTP to a remote host is possible only after the user ticks "Allow
+  unencrypted HTTP" for that server. The consent is not inferred from the URL,
+  defaults to off, and is retracted automatically when the URL returns to HTTPS or
+  loopback — so a cleartext URL saved by an older release stops receiving tokens
+  after an upgrade until it is reconfirmed.
+
+**Self-hosting:** expose the backend over TLS (for example with a reverse proxy in
+front of it) and use the `https://` URL in the app. `adb reverse` and on-device
+development over loopback HTTP keep working without TLS.
+
 ## Abuse controls
 
 - A global per-client rate limiter (`REQUESTS_PER_MINUTE`) guards non-public
