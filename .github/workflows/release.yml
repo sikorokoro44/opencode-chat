@@ -1,9 +1,17 @@
 name: Release
 
+# Publishing a signed APK. Triggered by pushing a `v*` tag.
+#
+# The keystore and its passwords live only in GitHub Secrets; nothing
+# sensitive is ever written to the repository or to a build log.
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   probe:
