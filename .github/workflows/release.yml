@@ -31,8 +31,6 @@ jobs:
     name: Lint, test, sign and publish
     needs: backend-checks
     runs-on: ubuntu-latest
-    env:
-      ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/release.jks
     steps:
       - uses: actions/checkout@v4
       - name: Make wrapper executable
