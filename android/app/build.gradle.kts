@@ -8,12 +8,21 @@ plugins {
 // from the environment only: `-P` properties would be printed in the build log.
 // When the variables are absent (fork pull requests, local builds) the release
 // variant simply stays unsigned so the build still succeeds.
-val keystorePath = providers.environmentVariable("ANDROID_KEYSTORE_PATH").orNull
-val keystorePassword = providers.environmentVariable("ANDROID_KEYSTORE_PASSWORD").orNull
-val keyAlias = providers.environmentVariable("ANDROID_KEY_ALIAS").orNull
-val keyPassword = providers.environmentVariable("ANDROID_KEY_PASSWORD").orNull
+//
+// The locals are deliberately named `release*`: SigningConfig declares
+// `storeFile`, `storePassword`, `keyAlias` and `keyPassword`, so a local named
+// after one of those would shadow it and silently assign null to itself.
+val releaseKeystorePath = providers.environmentVariable("ANDROID_KEYSTORE_PATH").orNull
+val releaseStorePassword = providers.environmentVariable("ANDROID_KEYSTORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("ANDROID_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("ANDROID_KEY_PASSWORD").orNull
 val hasReleaseSigning =
-    listOf(keystorePath, keystorePassword, keyAlias, keyPassword).all { !it.isNullOrBlank() }
+    listOf(
+        releaseKeystorePath,
+        releaseStorePassword,
+        releaseKeyAlias,
+        releaseKeyPassword
+    ).all { !it.isNullOrBlank() }
 
 val versionNameOverride = providers.environmentVariable("ANDROID_VERSION_NAME").orNull
 val versionCodeOverride = providers.environmentVariable("ANDROID_VERSION_CODE").orNull?.toIntOrNull()
@@ -35,10 +44,10 @@ android {
     signingConfigs {
         if (hasReleaseSigning) {
             create("release") {
-                storeFile = project.file(keystorePath!!)
-                storePassword = keystorePassword
-                keyAlias = keyAlias
-                keyPassword = keyPassword
+                storeFile = project.file(releaseKeystorePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
                 // All three schemes are produced so the APK installs on
                 // API 24+ (v2/v3) and stays verifiable by tooling that
                 // checks legacy JAR signing (v1).
