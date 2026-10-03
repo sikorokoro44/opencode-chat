@@ -1,9 +1,5 @@
 name: Release
 
-# Publishing a signed APK. Triggered by pushing a `v*` tag.
-#
-# The keystore and its passwords live only in GitHub Secrets; nothing
-# sensitive is ever written to the repository or to a build log.
 on:
   push:
     tags:
@@ -14,7 +10,31 @@ permissions:
   contents: write
 
 jobs:
-  probe:
+  backend-checks:
+    name: Backend typecheck, lint and test
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
     steps:
-      - run: echo probe
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+
+  release:
+    name: Lint, test, sign and publish
+    needs: backend-checks
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+    steps:
+      - uses: actions/checkout@v4
+      - name: Make wrapper executable
+        working-directory: android
+        run: chmod +x ./gradlew
